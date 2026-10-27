@@ -1,4 +1,4 @@
-# Grumpy Screen for Klipper
+# Grumpy Screen for Klipper (Creator C5 PRO)
 
 Grumpyscreen is a fork of GuppyScreen specifically for Simple AF and OpenCentauri Cosmos
 
