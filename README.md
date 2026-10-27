@@ -6,8 +6,7 @@ Grumpyscreen is a fork of GuppyScreen specifically for Simple AF and OpenCentaur
 
 cd 'project folder'
 
-make CROSS_COMPILE=/home/ubuntu/ingenic-toolchain/mips-xburst2-linux-toolchain-r6.0.0/bin/mips-xburst2-linux-gnu- -j2
-
+make CROSS_COMPILE=/home/ubuntu/ingenic-toolchain/mips-xburst2-linux-toolchain-r6.0.0/bin/mips-xburst2-linux-gnu- release-zip
 
 ## Features
 
