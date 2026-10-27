@@ -1,5 +1,5 @@
 #include "theme.h"
-#include <fmt/core.h>
+#include <fmt/format.h>
 #include "config.h"
 #include "logger.h"
 #include "icons.h"

@@ -195,6 +195,11 @@ libhv.a: $(LIBHV_A)
 wpaclient: $(WPA_CLIENT_A)
 
 $(LIBHV_A): $(LIBHV_INPUTS)
+	@mkdir -p libhv/tmp
+	@echo 'Configuro libhv con il toolchain selezionato...'
+	@cd libhv && CROSS_COMPILE='$(CROSS_COMPILE)' bash ./configure
+	@test -f libhv/config.mk || cp libhv/config.ini libhv/config.mk
+	@test -f libhv/config.mk || { echo 'ERRORE: libhv/config.mk non generato'; exit 1; }
 	$(MAKE) -C libhv clean
 	$(MAKE) -C libhv -j$$(nproc) libhv
 	@mkdir -p $(DEPS_LIB_DIR)
