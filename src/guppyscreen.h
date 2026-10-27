@@ -1,0 +1,69 @@
+#ifndef __GUPPY_SCREEN_H__
+#define __GUPPY_SCREEN_H__
+
+#include <mutex>
+#include <functional>
+#include <memory>
+
+#ifdef GUPPY_CALIBRATE
+#include "lv_tc.h"
+#include "lv_tc_screen.h"
+#include "hv/json.hpp"
+#endif
+#include "lvgl/lvgl.h"
+
+#include "platform.h"
+#include "init_panel.h"
+#include "main_panel.h"
+#include "spoolman_panel.h"
+#include "mmu_panel.h"
+// vendor drivers are compiled in per build; see MMU_BACKENDS in the Makefile
+#ifdef MMU_BACKEND_AFC
+#include "afc_backend.h"
+#endif
+#ifdef MMU_BACKEND_HH
+#include "hh_backend.h"
+#endif
+
+#include "websocket_client.h"
+
+class GuppyScreen {
+ private:
+  static GuppyScreen *instance;
+  static lv_style_t style_container;
+  static lv_theme_t th_new;
+  static lv_obj_t *screen_saver;
+  static std::mutex lv_lock;
+  static KWebSocketClient ws;
+  SpoolmanPanel spoolman_panel;
+  std::unique_ptr<MmuPanel> mmu_panel;
+#ifdef MMU_BACKEND_AFC
+  std::unique_ptr<AfcBackend> afc_backend;
+#endif
+#ifdef MMU_BACKEND_HH
+  std::unique_ptr<HhBackend> hh_backend;
+#endif
+  
+  MainPanel main_panel;
+  InitPanel init_panel;
+
+ public:
+  GuppyScreen();
+  GuppyScreen(GuppyScreen &o) = delete;
+  void operator=(const GuppyScreen &) = delete;
+
+  std::mutex &get_lock();
+
+  void connect_ws(const std::string &url);
+  static GuppyScreen *get();
+  static GuppyScreen *init(std::function<void(lv_color_t, lv_color_t)> hal_init);
+  static void loop();
+  static void new_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj);
+#ifdef GUPPY_CALIBRATE
+  static void handle_calibrated(lv_event_t *event);
+  static std::vector<float> load_calibration_coeff();
+  static void save_calibration_coeff(lv_tc_coeff_t coeff);
+#endif
+};
+
+#endif  // __GUPPY_SCREEN_H__

@@ -1,0 +1,58 @@
+#ifndef __K_UTILS_H__
+#define __K_UTILS_H__
+
+#include "hv/json.hpp"
+#include <vector>
+#include <map>
+#include <functional>
+#include <algorithm>
+#include <utility>
+#include <sstream>
+
+template <typename Range>
+std::string join(const Range& r, const std::string& sep) {
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& v : r) {
+        if (!first) oss << sep;
+        first = false;
+        oss << v;
+    }
+    return oss.str();
+}
+
+using json = nlohmann::json;
+
+namespace KUtils {
+  std::string get_root_path(const std::string root_name);
+
+  // path, width
+  // picks the embedded thumbnail closest to target_width px
+  std::pair<std::string, size_t> get_thumbnail(const std::string &gcode_file, json &j, int target_width);
+
+  std::vector<std::string> get_interfaces();
+  std::string interface_ip(const std::string &interface);
+  std::string get_wifi_interface();
+
+  template <typename Out>
+  void split(const std::string &s, char delim, Out result);
+
+  std::vector<std::string> split(const std::string &s, char delim);
+
+  std::string get_obj_name(const std::string &id);
+  std::string to_title(std::string s);
+  std::string eta_string(int64_t s);
+  size_t bytes_to_mb(size_t s);
+
+  template<typename T, typename U> void sort_map_values(std::map<T, U> v,
+							std::vector<U> &out_vect,
+							std::function<bool(U&, U&)> sorter) {
+    for (auto &el : v) {
+      out_vect.push_back(el.second);
+    }
+
+    std::sort(out_vect.begin(), out_vect.end(), sorter);
+  };
+};
+
+#endif // __K_UTILS_H__

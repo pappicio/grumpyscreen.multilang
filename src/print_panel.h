@@ -1,0 +1,83 @@
+#ifndef __PRINT_PANEL_H__
+#define __PRINT_PANEL_H__
+
+#include "lvgl/lvgl.h"
+#include "websocket_client.h"
+#include "notify_consumer.h"
+#include "button_container.h"
+#include "file_panel.h"
+#include "print_status_panel.h"
+#include "mmu_panel.h"
+#include "tree.h"
+
+class PrintPanel : public NotifyConsumer {
+ public:
+  PrintPanel(KWebSocketClient &ws, std::mutex &lv_lock, PrintStatusPanel &ps, MmuPanel *mmu);
+  ~PrintPanel();
+
+  void consume(json &data);
+  void populate_files(json &data);
+  void subscribe();
+  void foreground();
+  void background();
+  void handle_callback(lv_event_t *event);
+  void handle_metadata(const std::string& full_path, json & data);
+  void handle_back_btn(lv_event_t *event);
+  void handle_print_callback(lv_event_t *event);
+  void handle_status_btn(lv_event_t *event);
+  void handle_file_list_change(json &d);
+  void delete_file(uint32_t btn_idx);
+
+  static void _handle_callback(lv_event_t *event) {
+    PrintPanel *panel = (PrintPanel*)event->user_data;
+    panel->handle_callback(event);
+  };
+
+  static void _handle_back_btn(lv_event_t *event) {
+    PrintPanel *panel = (PrintPanel*)event->user_data;
+    panel->handle_back_btn(event);
+  };
+  
+  static void _handle_print_callback(lv_event_t *event) {
+    PrintPanel *panel = (PrintPanel*)event->user_data;
+    panel->handle_print_callback(event);
+  };
+
+  static void _handle_status_btn(lv_event_t *event) {
+    PrintPanel *panel = (PrintPanel*)event->user_data;
+    panel->handle_status_btn(event);
+  };
+
+  static void _delete_file(lv_obj_t *, uint32_t btn_idx, void *user_data) {
+    static_cast<PrintPanel *>(user_data)->delete_file(btn_idx);
+  };
+
+ private:
+  void show_dir(Tree *dir, uint32_t sort_type);
+  void show_file_detail(Tree *f);
+  void start_print(const std::string &path);
+  
+  KWebSocketClient &ws;
+  lv_obj_t *files_cont;
+  lv_obj_t *spinner;
+  lv_obj_t *left_cont;
+  lv_obj_t *file_table;
+  lv_obj_t *file_view;
+  ButtonContainer status_btn;
+  ButtonContainer print_btn;
+  ButtonContainer back_btn;
+  Tree root;
+  Tree *cur_dir;
+  Tree *cur_file;
+  FilePanel file_panel;
+  PrintStatusPanel &print_status;
+  MmuPanel *mmu;
+  uint32_t sorted_by;
+  bool refreshing_files;
+  bool refresh_pending;
+  bool visible;
+  bool suppress_next_table_selection = false;
+  std::string pending_delete_path;
+};
+
+#endif // __PRINT_PANEL_H__

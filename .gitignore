@@ -1,0 +1,11 @@
+/*.log
+build/
+build-bootstrap/
+*.d
+*.o
+*.a
+/.idea
+debug/
+releases/
+.target.cfg
+__pycache__/

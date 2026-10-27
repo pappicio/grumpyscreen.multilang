@@ -1,0 +1,308 @@
+// test_config.cpp
+#include <cassert>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+#include "config.h"
+
+static std::string write_tmp_ini(const std::string& path, const std::string& text) {
+    std::ofstream out(path);
+    out << text;
+    out.close();
+    return path;
+}
+
+int main() {
+    const std::string ini = R"INI(
+# simple sections
+[logging]
+level: info
+
+[moonraker]
+host: 127.0.0.1
+port: 7125
+
+[display]
+brightness: 90
+rotate: 1
+sleep_sec: 600
+
+[ui]
+numeric_true: 1
+numeric_false: 0
+prompt_emergency_stop: true
+display_sleep_sec: 600
+extruder_temp_presets: 190, 220, 245
+extruder_temp_default: 245
+extruder_length_presets: 5, 25
+extruder_length_default: 25
+extruder_speed_presets: 2, 8, 16
+extruder_speed_default: 8
+
+[mmu]
+materials: PLA, PETG, ABS, ASA, TPU, PC, PA-CF, PETG-CF
+
+[fan "fan"]
+display_name: Toolhead
+
+# repeated objects
+[led "output_pin LED"]
+display_name: LED
+pwm: true
+
+[led "output_pin red_pin"]
+display_name: Red
+pwm: false
+
+[fan "fan_generic chamber"]
+display_name: Chamber
+
+[macro "BED_MESH_CALIBRATE"]
+display_name: Bed Mesh
+icon: bed
+)INI";
+
+    const std::string override_ini = R"INI(
+[moonraker]
+host: moonraker.local
+missing_key: ignored
+
+[ui]
+extruder_temp_default: 250
+new_setting: ignored
+
+[fan "fan"]
+display_name: Toolhead Override
+new_field: ignored
+
+[fan "fan_generic nevermore"]
+display_name: Nevermore
+
+[led "output_pin white_pin"]
+display_name: White
+pwm: false
+
+[monitored_sensor "temperature_sensor enclosure"]
+display_name: Enclosure
+color: green
+controllable: true
+
+[monitored_sensor "extruder1"]
+display_name: Extruder 1
+color: blue
+controllable: true
+
+[monitored_sensor "extruder2"]
+display_name: Extruder 2
+color: red
+controllable: true
+
+[macro "G28"]
+display_name: Home
+icon: home
+
+[missing_section]
+value: ignored
+)INI";
+
+    auto path = write_tmp_ini("build/test_config.ini", ini);
+    auto override_path = write_tmp_ini("build/test_config_override.ini", override_ini);
+#ifndef COSMOS
+    const auto vendor_path = write_tmp_ini("build/test_config_vendor.ini", R"INI(
+[moonraker]
+host: vendor.moonraker.local
+vendor_only: enabled
+
+[vendor]
+name: Example Vendor
+
+[fan "fan_generic vendor"]
+display_name: Vendor Fan
+)INI");
+#endif
+
+    Config* conf = Config::get_instance();
+    assert(conf->load(path) && "load should succeed");
+    assert(!conf->has_override_path());
+#ifndef COSMOS
+    // Vendor config is a normal final config layer: it can add sections and
+    // keys that the restricted override mechanism deliberately ignores.
+    assert(conf->load_vendor(vendor_path) && "vendor load should succeed");
+    assert(conf->get<std::string>("/moonraker/host") == "vendor.moonraker.local");
+    assert(conf->get<std::string>("/moonraker/vendor_only") == "enabled");
+    assert(conf->get<std::string>("/vendor/name") == "Example Vendor");
+    auto vendor_fans = conf->get_objects("/fan");
+    assert(vendor_fans.size() == 3);
+    assert(vendor_fans.back()["id"] == "fan_generic vendor");
+
+    // Overrides remain the final layer and therefore take precedence over
+    // settings supplied by the vendor config.
+#endif
+    assert(conf->load_override(override_path) && "override load should succeed");
+    assert(conf->has_override_path());
+
+    // scalars
+    assert(conf->get<std::string>("/logging/level") == "info");
+    assert(conf->get<std::string>("/moonraker/host") == "moonraker.local");
+    assert(conf->get<int32_t>("/moonraker/port") == 7125);
+    assert(conf->get<int32_t>("/display/brightness") == 90);
+    assert(conf->get<int32_t>("/display/rotate") == 1);
+    assert(conf->get<int32_t>("/display/sleep_sec") == 600);
+    assert(conf->get<bool>("/ui/numeric_true"));
+    assert(!conf->get<bool>("/ui/numeric_false"));
+    assert(conf->get<std::string>("/ui/extruder_temp_presets") == "190, 220, 245");
+    assert(conf->get<int32_t>("/ui/extruder_temp_default") == 250);
+    assert(conf->get<std::string>("/ui/extruder_length_presets") == "5, 25");
+    assert(conf->get<int32_t>("/ui/extruder_length_default") == 25);
+    assert(conf->get<std::string>("/ui/extruder_speed_presets") == "2, 8, 16");
+    assert(conf->get<int32_t>("/ui/extruder_speed_default") == 8);
+    assert(conf->get<std::string>("/missing/key", "default") == "default");
+    assert(conf->get<std::string>("/missing/key") == ""); // empty by default
+    assert(conf->get<std::string>("/moonraker/missing_key", "default") == "default");
+    assert(conf->get<std::string>("/ui/new_setting", "default") == "default");
+    assert(conf->get<std::string>("/mmu/materials") == "PLA, PETG, ABS, ASA, TPU, PC, PA-CF, PETG-CF");
+
+    // The two writable UI values update both the live config and only their
+    // targeted lines in the override file. Existing comments and formatting
+    // must survive.
+    const std::string writable_override =
+        "# user heading\n"
+        "[ui]\n"
+        "prompt_emergency_stop = true   # keep this comment\n"
+        "; another comment\n"
+        "\n"
+        "[moonraker]\n"
+        "host: moonraker.local\n";
+    auto writable_override_path = write_tmp_ini("build/test_config_writable_override.ini", writable_override);
+    conf->set_override_path(writable_override_path);
+    assert(conf->set_prompt_emergency_stop(false));
+    assert(conf->set_display_sleep_sec(1800));
+    assert(!conf->get<bool>("/ui/prompt_emergency_stop"));
+    assert(conf->get<int32_t>("/ui/display_sleep_sec") == 1800);
+
+    std::ifstream patched_input(writable_override_path);
+    const std::string patched((std::istreambuf_iterator<char>(patched_input)),
+                              std::istreambuf_iterator<char>());
+    assert(patched ==
+        "# user heading\n"
+        "[ui]\n"
+        "prompt_emergency_stop = false   # keep this comment\n"
+        "; another comment\n"
+        "\n"
+        "display_sleep_sec: 1800\n"
+        "[moonraker]\n"
+        "host: moonraker.local\n");
+
+    // When no CONFIG_OVERRIDE_FILE is configured, persist the same two
+    // settings in the loaded main config instead.
+    assert(conf->load(path) && "reload without override should succeed");
+    assert(!conf->has_override_path());
+    assert(conf->set_prompt_emergency_stop(false));
+    assert(conf->set_display_sleep_sec(-1));
+    assert(!conf->get<bool>("/ui/prompt_emergency_stop"));
+    assert(conf->get<int32_t>("/ui/display_sleep_sec") == -1);
+
+    std::ifstream main_patched_input(path);
+    const std::string main_patched((std::istreambuf_iterator<char>(main_patched_input)),
+                                   std::istreambuf_iterator<char>());
+    assert(main_patched.find("prompt_emergency_stop: false") != std::string::npos);
+    assert(main_patched.find("display_sleep_sec: -1") != std::string::npos);
+
+    // The remaining object assertions cover the merged override view.
+    assert(conf->load_override(override_path) && "override reload should succeed");
+
+    // objects
+    auto leds = conf->get_objects("/led");
+    assert(leds.size() == 3);
+
+    // map by id for easy checks
+    nlohmann::json by_id = nlohmann::json::object();
+    for (const auto& o : leds) {
+        assert(o.is_object());
+        const auto it = o.find("id");
+        assert(it != o.end() && it->is_string());
+        by_id[it->get<std::string>()] = o;
+    }
+
+    assert(by_id.contains("output_pin LED"));
+    assert(by_id["output_pin LED"]["display_name"] == "LED");
+    assert(by_id["output_pin LED"]["pwm"] == true);
+
+    assert(by_id.contains("output_pin red_pin"));
+    assert(by_id["output_pin red_pin"]["display_name"] == "Red");
+    assert(by_id["output_pin red_pin"]["pwm"] == false);
+
+    auto fans = conf->get_objects("/fan");
+    assert(fans.size() == 3);
+
+    auto macros = conf->get_objects("/macro");
+    assert(macros.size() == 2);
+    nlohmann::json macro_by_id = nlohmann::json::object();
+    for (const auto& macro : macros) {
+        macro_by_id[macro["id"].get<std::string>()] = macro;
+    }
+    assert(macro_by_id["BED_MESH_CALIBRATE"]["display_name"] == "Bed Mesh");
+    assert(macro_by_id["BED_MESH_CALIBRATE"]["icon"] == "bed");
+    // This macro exists only in the override file.
+    assert(macro_by_id["G28"]["display_name"] == "Home");
+    assert(macro_by_id["G28"]["icon"] == "home");
+
+		nlohmann::json fan_by_id = nlohmann::json::object();
+		for (const auto& o : fans) {
+				assert(o.is_object());
+				const auto it = o.find("id");
+				assert(it != o.end() && it->is_string());
+				fan_by_id[it->get<std::string>()] = o;
+		}
+
+    assert(fan_by_id.contains("fan"));
+    assert(fan_by_id["fan"]["display_name"] == "Toolhead Override");
+    assert(!fan_by_id["fan"].contains("new_field"));
+    assert(fan_by_id.contains("fan_generic nevermore"));
+
+    nlohmann::json led_by_id = nlohmann::json::object();
+    for (const auto& o : leds) {
+        const auto it = o.find("id");
+        assert(it != o.end() && it->is_string());
+        led_by_id[it->get<std::string>()] = o;
+    }
+    assert(led_by_id.contains("output_pin white_pin"));
+
+    auto sensors = conf->get_objects("/monitored_sensor");
+    nlohmann::json sensor_by_id = nlohmann::json::object();
+    for (const auto& o : sensors) {
+        const auto it = o.find("id");
+        assert(it != o.end() && it->is_string());
+        sensor_by_id[it->get<std::string>()] = o;
+    }
+    assert(sensor_by_id.contains("temperature_sensor enclosure"));
+    assert(sensor_by_id.contains("extruder1"));
+    assert(sensor_by_id.contains("extruder2"));
+
+    // A normal config has no [macro] sections. An override may introduce the
+    // group, rather than only modifying macros declared by the base config.
+    const auto macro_base_path = write_tmp_ini("build/test_config_macro_base.ini", "[ui]\n");
+    const auto macro_override_path = write_tmp_ini("build/test_config_macro_override.ini",
+        "[macro \"G28\"]\n"
+        "display_name: Home\n"
+        "icon: home\n");
+    assert(conf->load(macro_base_path));
+    assert(conf->load_override(macro_override_path));
+    auto override_only_macros = conf->get_objects("/macro");
+    assert(override_only_macros.size() == 1);
+    assert(override_only_macros[0]["id"] == "G28");
+    assert(override_only_macros[0]["display_name"] == "Home");
+
+    std::remove("build/test_config.ini");
+    std::remove("build/test_config_override.ini");
+#ifndef COSMOS
+    std::remove("build/test_config_vendor.ini");
+#endif
+    std::remove("build/test_config_writable_override.ini");
+    std::remove("build/test_config_macro_base.ini");
+    std::remove("build/test_config_macro_override.ini");
+    std::cout << "All config and MMU tests passed successfully!\n";
+
+    return 0;
+}

@@ -1,0 +1,276 @@
+#include "lvgl/lvgl.h"
+#include "theme.h"
+#include "lv_drivers/display/fbdev.h"
+#include "lv_drivers/indev/evdev.h"
+#ifdef GUPPY_SDL
+#include "lv_drivers/sdl/sdl.h"
+#endif
+#ifdef GUPPY_CALIBRATE
+#include "lv_tc.h"
+#include "lv_tc_screen.h"
+#endif
+#include <unistd.h>
+#include <cstdlib>
+#include <experimental/filesystem>
+#include <fstream>
+#include <time.h>
+
+#include "hv/json.hpp"
+#include "wifi_panel.h"
+#include "hv/hlog.h"
+#include "logger.h"
+
+using namespace hv;
+namespace fs = std::experimental::filesystem;
+using json = nlohmann::json;
+
+#define DISP_BUF_SIZE (128 * 1024)
+
+namespace {
+constexpr double calibration_version = 2.0;
+// bootstrap has no grumpyscreen.cfg to read a [theme] from, so the whole
+// palette is compiled in here. These are the values grumpyscreen.cfg ships.
+constexpr uint32_t bootstrap_primary_rgb = 0x2196F3;
+constexpr uint32_t bootstrap_secondary_rgb = 0xF44336;
+
+void install_palette() {
+    lv_color_t p[Theme::COLOUR_COUNT];
+    p[Theme::BG]         = lv_color_hex(0x282B30);
+    p[Theme::SURFACE]    = lv_color_hex(0x282B30);
+    p[Theme::RAISED]     = lv_color_hex(0x2F3237);
+    p[Theme::SELECTED]   = lv_color_hex(0x9E9E9E);
+    p[Theme::BORDER]     = lv_color_hex(0x2F3237);
+    p[Theme::BORDER_DIM] = lv_color_hex(0x616161);
+    p[Theme::TEXT]       = lv_color_hex(0xFAFAFA);
+    p[Theme::TEXT_DIM]   = lv_color_hex(0x9E9E9E);
+    p[Theme::ICON]       = lv_color_hex(0xFFFFFF);
+    p[Theme::DISABLED]   = lv_color_hex(0x757575);
+    p[Theme::ON_PRIMARY] = lv_color_hex(0xFFFFFF);
+    p[Theme::DANGER]     = lv_color_hex(0xD32F2F);
+    p[Theme::WARNING]    = lv_color_hex(0xFFA000);
+    p[Theme::SUCCESS]    = lv_color_hex(0x388E3C);
+    p[Theme::INFO]       = lv_color_hex(0x1976D2);
+    Theme::set_palette(p);
+}
+
+std::uint32_t get_display_rotate() {
+    const char *rotate_env = std::getenv("DISPLAY_ROTATE");
+    if (rotate_env == nullptr || rotate_env[0] == '\0') {
+        return 0;
+    }
+
+    char *end = nullptr;
+    const unsigned long rotate = std::strtoul(rotate_env, &end, 10);
+    if (end == rotate_env || *end != '\0' || rotate > 3) {
+        LOG_ERROR("Invalid DISPLAY_ROTATE='{}', expected 0-3", rotate_env);
+        return 0;
+    }
+
+    return static_cast<std::uint32_t>(rotate);
+}
+
+#ifdef GUPPY_CALIBRATE
+fs::path get_calibration_path() {
+    return fs::canonical("/proc/self/exe").parent_path() / "calibration.json";
+}
+
+std::vector<float> load_calibration_coeff() {
+    std::ifstream f(get_calibration_path());
+    if (!f.is_open()) {
+        return {};
+    }
+
+    json j;
+    f >> j;
+    if (!j.is_object()) {
+        LOG_INFO("Discarding calibration data: legacy or invalid format");
+        return {};
+    }
+
+    if (!j.contains("version") || !j["version"].is_number() ||
+        j["version"].get<double>() != calibration_version) {
+        LOG_INFO("Discarding calibration data: missing or unsupported version");
+        return {};
+    }
+
+    if (!j.contains("display_rotate") || !j["display_rotate"].is_number_unsigned()) {
+        LOG_INFO("Discarding calibration data: missing display_rotate");
+        return {};
+    }
+
+    const auto saved_rotate = j["display_rotate"].get<std::uint32_t>();
+    const auto current_rotate = get_display_rotate();
+    if (saved_rotate != current_rotate) {
+        LOG_INFO("Discarding calibration data: display_rotate changed from {} to {}", saved_rotate, current_rotate);
+        return {};
+    }
+
+    if (!j.contains("calibrations") || !j["calibrations"].is_array()) {
+        LOG_INFO("Discarding calibration data: missing calibrations");
+        return {};
+    }
+
+    const auto &values = j["calibrations"];
+    if (values.size() != 6) {
+        LOG_INFO("Discarding calibration data: expected 6 coefficients, got {}", values.size());
+        return {};
+    }
+
+    std::vector<float> coeffs;
+    coeffs.reserve(values.size());
+    for (const auto &v : values) {
+        coeffs.push_back(v.get<float>());
+    }
+    return coeffs;
+}
+
+void save_calibration_coeff(lv_tc_coeff_t coeff) {
+    json j = {
+        {"version", calibration_version},
+        {"display_rotate", get_display_rotate()},
+        {"calibrations", {coeff.a, coeff.b, coeff.c, coeff.d, coeff.e, coeff.f}},
+    };
+    std::ofstream f(get_calibration_path(), std::ios::trunc);
+    f << j.dump(2);
+}
+
+void handle_calibrated(lv_event_t *event) {
+    LOG_INFO("Finished calibration");
+    lv_obj_t *main_screen = static_cast<lv_obj_t *>(event->user_data);
+    lv_disp_load_scr(main_screen);
+}
+#endif
+}
+
+uint32_t custom_tick_get(void) {
+    static uint64_t start_ms = 0;
+    if (start_ms == 0) {
+        struct timespec ts_start;
+        clock_gettime(CLOCK_MONOTONIC, &ts_start);
+        start_ms = static_cast<uint64_t>(ts_start.tv_sec) * 1000ULL +
+                   static_cast<uint64_t>(ts_start.tv_nsec) / 1000000ULL;
+    }
+
+    struct timespec ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    const uint64_t now_ms = static_cast<uint64_t>(ts_now.tv_sec) * 1000ULL +
+                            static_cast<uint64_t>(ts_now.tv_nsec) / 1000000ULL;
+
+    return static_cast<uint32_t>(now_ms - start_ms);
+}
+
+static void hal_init(lv_color_t primary, lv_color_t secondary) {
+    lv_disp_t *disp = nullptr;
+
+    static lv_color_t buf[DISP_BUF_SIZE];
+    static lv_color_t buf2[DISP_BUF_SIZE];
+
+    static lv_disp_draw_buf_t disp_buf;
+    lv_disp_draw_buf_init(&disp_buf, buf, buf2, DISP_BUF_SIZE);
+
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.draw_buf = &disp_buf;
+
+#ifdef GUPPY_SDL
+    sdl_init();
+    disp_drv.flush_cb = sdl_display_flush;
+    disp_drv.hor_res = SDL_HOR_RES;
+    disp_drv.ver_res = SDL_VER_RES;
+#else
+    disp_drv.flush_cb = fbdev_flush;
+
+    uint32_t width;
+    uint32_t height;
+    uint32_t dpi;
+    fbdev_get_sizes(&width, &height, &dpi);
+
+    disp_drv.hor_res = width;
+    disp_drv.ver_res = height;
+    const auto rotate_value = get_display_rotate();
+    if (rotate_value > 0 && rotate_value < 4) {
+        disp_drv.sw_rotate = 1;
+        disp_drv.rotated = rotate_value;
+    }
+#endif
+
+    disp = lv_disp_drv_register(&disp_drv);
+
+#ifdef GUPPY_SDL
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.read_cb = sdl_mouse_read;
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    lv_indev_drv_register(&indev_drv);
+#else
+    const char *path = std::getenv("LVGL_EVDEV_DEV");
+    if (path != nullptr && path[0] != '\0') {
+        LOG_INFO("Input Device is: {}", path);
+        evdev_set_file(const_cast<char *>(path));
+    } else {
+        evdev_init();
+    }
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.read_cb = evdev_read;
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+#ifdef GUPPY_CALIBRATE
+    lv_tc_indev_drv_init(&indev_drv, evdev_read);
+#endif
+    lv_indev_drv_register(&indev_drv);
+#endif
+
+    // 12 on a 480x272 panel, 20 on 800x480 -- the same sizes the build used to
+    // pick with an #ifdef, now read off the display that is actually attached
+    lv_theme_t *th = lv_theme_default_init(disp, primary, secondary, true, Theme::scale_font(12));
+    lv_disp_set_theme(disp, th);
+}
+
+int main(void) {
+    hlog_disable();
+    set_log_level(LogLevel::INFO);
+
+    lv_init();
+    install_palette();
+
+#ifndef GUPPY_SDL
+    fbdev_init();
+    fbdev_unblank();
+#endif
+
+    hal_init(lv_color_hex(bootstrap_primary_rgb), lv_color_hex(bootstrap_secondary_rgb));
+
+    std::mutex lv_lock;
+    const std::string footer_text = fmt::format("Build {}", GUPPYSCREEN_VERSION);
+    WifiPanelOptions wifi_options;
+    wifi_options.parent = lv_scr_act();
+    wifi_options.show_refresh_button = true;
+    wifi_options.footer_text = footer_text.c_str();
+    WifiPanel wifi_panel(lv_lock, wifi_options);
+    wifi_panel.foreground();
+
+#ifdef GUPPY_CALIBRATE
+    lv_obj_t *main_screen = lv_disp_get_scr_act(NULL);
+    const auto coeffs = load_calibration_coeff();
+    if (coeffs.empty()) {
+        lv_tc_register_coeff_save_cb(&save_calibration_coeff);
+        lv_obj_t *touch_calibrate_scr = lv_tc_screen_create();
+        lv_disp_load_scr(touch_calibrate_scr);
+        lv_tc_screen_start(touch_calibrate_scr);
+        lv_obj_add_event_cb(touch_calibrate_scr, &handle_calibrated, LV_EVENT_READY, main_screen);
+        LOG_INFO("Running touch calibration");
+    } else {
+        lv_tc_coeff_t coeff = {true, coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5]};
+        lv_tc_set_coeff(coeff, false);
+        LOG_INFO("Loaded calibration coefficients");
+    }
+#endif
+
+    while (1) {
+        lv_lock.lock();
+        lv_timer_handler();
+
+        lv_lock.unlock();
+        usleep(5000);
+    }
+}

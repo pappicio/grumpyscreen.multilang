@@ -1,0 +1,641 @@
+#include "exclude_object_panel.h"
+#include "i18n.h"
+
+#include "logger.h"
+#include "theme.h"
+
+using namespace Theme;
+#include "simple_dialog.h"
+#include "state.h"
+#include "icons.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <sstream>
+
+namespace {
+  // the bed drawing sits two gaps in from the canvas edge
+  lv_coord_t margin() { return 2 * gap(); }
+
+  // the plate the bed is drawn on: darker than any theme surface, so the
+  // objects on it read at a glance
+  const lv_color_t BED_BG = lv_color_make(30, 30, 30);
+
+  // The object colours this panel has always used, and the legend that names
+  // them, in one place: they were two lists of colours, and the legend's had
+  // stopped matching what gets drawn.
+  // (functions, not constants: the palette reads [theme] and needs a display)
+  lv_color_t OBJ_EXCLUDED() { return col(DANGER); }
+  lv_color_t OBJ_PRINTING() { return col(SUCCESS); }
+  lv_color_t OBJ_PENDING() { return col(INFO); }
+
+  // The numbered marker is what a finger aims at, so it is a target in its own
+  // right: on a ring- or C-shaped object the bounding box's centre falls
+  // outside the outline, and tapping the number would otherwise do nothing.
+  bool point_in_circle(lv_coord_t x, lv_coord_t y, lv_coord_t cx, lv_coord_t cy, lv_coord_t r) {
+    const long dx = x - cx;
+    const long dy = y - cy;
+    return dx * dx + dy * dy <= static_cast<long>(r) * r;
+  }
+
+  // A square plate filling the screen's content height, so the margin above
+  // and below it is the screen's own -- the same gap() as the one down its
+  // left side. Sizing it to half the width instead left it short of the
+  // content height and centred in the slack, which put its top edge below the
+  // legend's first line and made three different margins on three edges.
+  // Capped so the legend column keeps a readable width at any resolution.
+  //
+  // A canvas is content-sized, so its box is the buffer plus its own border on
+  // each side: the frame has to come out of the budget, or the plate overhangs
+  // the content area by exactly that much and eats the bottom margin.
+  lv_coord_t plate_border() { return scale_r(2); }
+
+  lv_coord_t calc_canvas_dim() {
+    const lv_coord_t content_w = lv_disp_get_physical_hor_res(NULL) - 2 * gap();
+    const lv_coord_t content_h = lv_disp_get_physical_ver_res(NULL) - 2 * gap();
+    const lv_coord_t legend_min = scale_w(190);  // its longest line, at the design size
+    const lv_coord_t frame = 2 * plate_border();
+    return std::min<lv_coord_t>(content_h - frame, content_w - legend_min - gap() - frame);
+  }
+
+  void handle_exclude_dialog_result(lv_obj_t *, uint32_t button_idx, void *user_data) {
+    auto *panel = static_cast<ExcludeObjectPanel *>(user_data);
+    panel->handle_dialog_result(button_idx);
+  }
+
+  bool parse_point2(const json &v, double &x, double &y) {
+    if (v.is_array() && v.size() >= 2) {
+      x = v[0].template get<double>();
+      y = v[1].template get<double>();
+      return true;
+    }
+
+    if (v.is_string()) {
+      std::string s = v.template get<std::string>();
+      std::replace(s.begin(), s.end(), ',', ' ');
+      std::stringstream ss(s);
+      if (ss >> x >> y) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  bool parse_scalar(const json &v, double &out) {
+    if (v.is_number()) {
+      out = v.template get<double>();
+      return true;
+    }
+
+    if (v.is_string()) {
+      try {
+        out = std::stod(v.template get<std::string>());
+        return true;
+      } catch (...) {
+        return false;
+      }
+    }
+
+    return false;
+  }
+
+  bool point_in_polygon(lv_coord_t x, lv_coord_t y, const std::vector<lv_point_t> &poly) {
+    if (poly.size() < 3) {
+      return false;
+    }
+
+    bool inside = false;
+    size_t j = poly.size() - 1;
+    for (size_t i = 0; i < poly.size(); j = i++) {
+      const lv_point_t &pi = poly[i];
+      const lv_point_t &pj = poly[j];
+      if ((pi.y > y) != (pj.y > y)) {
+        double x_intersect = static_cast<double>(pj.x - pi.x)
+          * static_cast<double>(y - pi.y)
+          / static_cast<double>(pj.y - pi.y)
+          + static_cast<double>(pi.x);
+        if (static_cast<double>(x) < x_intersect) {
+          inside = !inside;
+        }
+      }
+    }
+
+    return inside;
+  }
+} // namespace
+
+ExcludeObjectPanel::ExcludeObjectPanel(KWebSocketClient &websocket_client, std::mutex &l)
+  : NotifyConsumer(l)
+  , ws(websocket_client)
+  , panel_cont(create_screen(NULL))
+  , canvas(lv_canvas_create(panel_cont))
+  , canvas_dim(calc_canvas_dim())
+  // true colour, so 230KB at 480x272: a smaller format would need a palette
+  // for the theme colours and the recolours; left as is
+  , canvas_buf(static_cast<lv_color_t *>(malloc(LV_CANVAS_BUF_SIZE_TRUE_COLOR(canvas_dim, canvas_dim))))
+  , info_cont(create_row(panel_cont))
+  , status_label(lv_label_create(info_cont))
+  , zoom_row(create_row(info_cont))
+  , zoom_out_btn(create_text_btn(zoom_row, LV_SYMBOL_MINUS, &ExcludeObjectPanel::_handle_zoom, this))
+  , zoom_in_btn(create_text_btn(zoom_row, LV_SYMBOL_PLUS, &ExcludeObjectPanel::_handle_zoom, this))
+  , back_btn(panel_cont, Icons::BACK, ::tr("Back"), &ExcludeObjectPanel::_handle_callback, this)
+{
+  lv_obj_move_background(panel_cont);
+  // canvas on the left, the legend column filling the rest, one gap apart
+  lv_obj_set_flex_flow(panel_cont, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(panel_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+  lv_canvas_set_buffer(canvas, canvas_buf, canvas_dim, canvas_dim, LV_IMG_CF_TRUE_COLOR);
+  // The bed drawing has always been a near-black plate in a grey frame, and a
+  // square one: a canvas paints its whole buffer, so a radius rounds the border
+  // and leaves the bitmap's own corners showing outside it.
+  lv_obj_set_style_border_width(canvas, plate_border(), 0);
+  lv_obj_set_style_border_color(canvas, col(BORDER_DIM), 0);
+  lv_canvas_fill_bg(canvas, BED_BG, LV_OPA_COVER);
+
+  // a tap highlights an object, a long press excludes it, a drag moves the
+  // zoomed view
+  lv_obj_add_flag(panel_cont, LV_OBJ_FLAG_CLICKABLE);
+  for (lv_event_code_t code : {LV_EVENT_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED, LV_EVENT_LONG_PRESSED}) {
+    lv_obj_add_event_cb(panel_cont, &ExcludeObjectPanel::_handle_canvas_event, code, this);
+  }
+
+  // legend at the top of the column so the floating Back tile below never
+  // sits on it
+  lv_obj_set_size(info_cont, 0, LV_PCT(100));
+  lv_obj_set_flex_grow(info_cont, 1);
+  lv_obj_set_flex_flow(info_cont, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(info_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_label_set_recolor(status_label, true);
+  lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(status_label, LV_PCT(100));
+  lv_obj_set_style_text_font(status_label, scale_font(14), 0);
+  lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
+
+  lv_obj_set_size(zoom_row, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(zoom_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(zoom_row, gap(), 0);
+  lv_obj_set_style_pad_top(zoom_row, gap(), 0);
+  for (lv_obj_t *btn : {zoom_out_btn, zoom_in_btn}) {
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, scale_r(44));
+  }
+
+  back_btn.float_bottom_right();
+
+  ws.register_notify_update(this);
+}
+
+ExcludeObjectPanel::~ExcludeObjectPanel() {
+  if (panel_cont != NULL) {
+    lv_obj_del(panel_cont);
+    panel_cont = NULL;
+  }
+
+  if (canvas_buf != NULL) {
+    free(canvas_buf);
+    canvas_buf = NULL;
+  }
+
+  ws.unregister_notify_update(this);
+}
+
+void ExcludeObjectPanel::foreground() {
+  is_foreground = true;
+  load_bed_bounds();
+  reset_view();
+  selected_name.clear();
+  redraw();
+  lv_obj_move_foreground(panel_cont);
+}
+
+void ExcludeObjectPanel::consume(json &j) {
+  auto pstate = j["/params/0/print_stats/state"_json_pointer];
+  if (!pstate.is_null()) {
+    std::string print_status = pstate.template get<std::string>();
+    if (print_status != "printing" && print_status != "paused") {
+      std::lock_guard<std::mutex> lock(lv_lock);
+      is_foreground = false;
+      pending_name.clear();
+      confirm_mbox = nullptr;
+      lv_obj_move_background(panel_cont);
+      return;
+    }
+  }
+
+  auto eo = j["/params/0/exclude_object"_json_pointer];
+  if (eo.is_null() || !is_foreground) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(lv_lock);
+  redraw();
+}
+
+void ExcludeObjectPanel::load_bed_bounds() {
+  auto s = State::get_instance();
+  auto stepper_x_max = s->get_data("/printer_state/configfile/config/stepper_x/position_max"_json_pointer);
+  auto stepper_y_max = s->get_data("/printer_state/configfile/config/stepper_y/position_max"_json_pointer);
+  double max_x = 0.0;
+  double max_y = 0.0;
+  if (parse_scalar(stepper_x_max, max_x) && parse_scalar(stepper_y_max, max_y)) {
+    bed_min_x = 0.0;
+    bed_min_y = 0.0;
+    bed_max_x = max_x;
+    bed_max_y = max_y;
+  }
+
+  if (bed_max_x - bed_min_x < 1.0) {
+    bed_min_x = 0.0;
+    bed_max_x = 220.0;
+  }
+
+  if (bed_max_y - bed_min_y < 1.0) {
+    bed_min_y = 0.0;
+    bed_max_y = 220.0;
+  }
+}
+
+void ExcludeObjectPanel::reset_view() {
+  zoom = 1.0;
+  view_x = (bed_min_x + bed_max_x) / 2.0;
+  view_y = (bed_min_y + bed_max_y) / 2.0;
+  update_zoom_buttons();
+}
+
+// keep the view centre on the bed so a drag can never lose it off screen
+void ExcludeObjectPanel::clamp_view() {
+  view_x = std::clamp(view_x, bed_min_x, bed_max_x);
+  view_y = std::clamp(view_y, bed_min_y, bed_max_y);
+}
+
+void ExcludeObjectPanel::set_zoom(double z) {
+  zoom = std::clamp(z, 1.0, 8.0);
+  if (zoom == 1.0) {
+    reset_view();
+  }
+  clamp_view();
+  update_zoom_buttons();
+  redraw();
+}
+
+void ExcludeObjectPanel::update_zoom_buttons() {
+  if (zoom <= 1.0) {
+    lv_obj_add_state(zoom_out_btn, LV_STATE_DISABLED);
+  } else {
+    lv_obj_clear_state(zoom_out_btn, LV_STATE_DISABLED);
+  }
+
+  if (zoom >= 8.0) {
+    lv_obj_add_state(zoom_in_btn, LV_STATE_DISABLED);
+  } else {
+    lv_obj_clear_state(zoom_in_btn, LV_STATE_DISABLED);
+  }
+}
+
+// at zoom 1 the whole bed fits the canvas inside the margin
+double ExcludeObjectPanel::px_per_mm() {
+  double avail = canvas_dim - 2 * margin();
+  return avail / std::max(bed_max_x - bed_min_x, bed_max_y - bed_min_y) * zoom;
+}
+
+lv_point_t ExcludeObjectPanel::to_px(double mx, double my) {
+  double scale = px_per_mm();
+  lv_point_t p;
+  p.x = static_cast<lv_coord_t>(std::lround(canvas_dim / 2.0 + (mx - view_x) * scale));
+  p.y = static_cast<lv_coord_t>(std::lround(canvas_dim / 2.0 - (my - view_y) * scale));
+  return p;
+}
+
+void ExcludeObjectPanel::redraw() {
+  obj_boxes.clear();
+  lv_canvas_fill_bg(canvas, BED_BG, LV_OPA_COVER);
+
+  lv_point_t bl = to_px(bed_min_x, bed_min_y);
+  lv_point_t tr = to_px(bed_max_x, bed_max_y);
+
+  lv_draw_rect_dsc_t bed_dsc;
+  lv_draw_rect_dsc_init(&bed_dsc);
+  bed_dsc.bg_opa = LV_OPA_TRANSP;
+  bed_dsc.border_color = col(BORDER_DIM);
+  bed_dsc.border_width = scale_r(2);
+  bed_dsc.border_opa = LV_OPA_COVER;
+  lv_canvas_draw_rect(canvas, tr.x, tr.y, bl.x - tr.x, bl.y - tr.y, &bed_dsc);
+
+  auto s = State::get_instance();
+  auto objects = s->get_data("/printer_state/exclude_object/objects"_json_pointer);
+  auto excluded = s->get_data("/printer_state/exclude_object/excluded_objects"_json_pointer);
+  auto current = s->get_data("/printer_state/exclude_object/current_object"_json_pointer);
+  std::string current_name = current.is_string() ? current.template get<std::string>() : "";
+
+  auto is_excluded = [&excluded](const std::string &name) {
+    if (!excluded.is_array()) {
+      return false;
+    }
+
+    for (auto &e : excluded) {
+      if (e.is_string() && e.template get<std::string>() == name) {
+        return true;
+      }
+
+      if (e.is_object() && e.contains("name") && e["name"] == name) {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  if (!objects.is_array() || objects.empty()) {
+    lv_label_set_text(status_label, ::tr("No excludable objects.\n\nThe gcode must be sliced\nwith object labels."));
+    return;
+  }
+
+  int idx = 0;
+  int n_excluded = 0;
+  for (auto &obj : objects) {
+    if (!obj.contains("name")) {
+      continue;
+    }
+
+    std::string name = obj["name"].template get<std::string>();
+    bool excl = is_excluded(name);
+    bool cur = name == current_name;
+    if (excl) {
+      n_excluded++;
+    }
+
+    lv_color_t color = excl ? OBJ_EXCLUDED() : (cur ? OBJ_PRINTING() : OBJ_PENDING());
+
+    std::vector<lv_point_t> pts;
+    double mx0 = 0.0, my0 = 0.0, mx1 = 0.0, my1 = 0.0;
+    auto add_point = [&](double px, double py) {
+      if (pts.empty()) {
+        mx0 = mx1 = px;
+        my0 = my1 = py;
+      }
+      mx0 = std::min(mx0, px);
+      my0 = std::min(my0, py);
+      mx1 = std::max(mx1, px);
+      my1 = std::max(my1, py);
+      pts.push_back(to_px(px, py));
+    };
+    if (obj.contains("polygon") && obj["polygon"].is_array() && !obj["polygon"].empty()) {
+      for (auto &v : obj["polygon"]) {
+        if (v.is_array() && v.size() >= 2) {
+          add_point(v[0].template get<double>(), v[1].template get<double>());
+        }
+      }
+    } else if (obj.contains("center") && obj["center"].is_array() && obj["center"].size() >= 2) {
+      double cx = obj["center"][0].template get<double>();
+      double cy = obj["center"][1].template get<double>();
+      add_point(cx - 5, cy - 5);
+      add_point(cx + 5, cy - 5);
+      add_point(cx + 5, cy + 5);
+      add_point(cx - 5, cy + 5);
+    }
+
+    if (pts.empty()) {
+      continue;
+    }
+
+    // the highlighted object is outlined in white
+    const bool selected = !excl && name == selected_name;
+
+    lv_coord_t x0 = pts[0].x;
+    lv_coord_t y0 = pts[0].y;
+    lv_coord_t x1 = pts[0].x;
+    lv_coord_t y1 = pts[0].y;
+    for (auto &p : pts) {
+      x0 = std::min(x0, p.x);
+      y0 = std::min(y0, p.y);
+      x1 = std::max(x1, p.x);
+      y1 = std::max(y1, p.y);
+    }
+    lv_draw_line_dsc_t line;
+    lv_draw_line_dsc_init(&line);
+    line.color = selected ? lv_color_white() : color;
+    line.width = selected ? scale_r(4) : scale_r(3);
+    line.opa = LV_OPA_COVER;
+    for (size_t i = 0; i < pts.size(); i++) {
+      lv_point_t seg[2] = {pts[i], pts[(i + 1) % pts.size()]};
+      lv_canvas_draw_line(canvas, seg, 2, &line);
+    }
+
+    lv_coord_t cx = (x0 + x1) / 2;
+    lv_coord_t cy = (y0 + y1) / 2;
+    lv_coord_t diameter = scale_r(24);
+    lv_coord_t radius = diameter / 2;
+    obj_boxes.push_back({name, idx + 1, x0, y0, x1, y1, cx, cy, radius, excl, pts,
+                         (mx0 + mx1) / 2.0, (my0 + my1) / 2.0});
+
+    lv_draw_rect_dsc_t marker;
+    lv_draw_rect_dsc_init(&marker);
+    marker.bg_color = color;
+    marker.bg_opa = excl ? LV_OPA_30 : LV_OPA_70;
+    marker.border_color = selected ? lv_color_white() : color;
+    marker.border_width = selected ? scale_r(3) : scale_r(2);
+    marker.border_opa = LV_OPA_COVER;
+    marker.radius = LV_RADIUS_CIRCLE;
+    lv_canvas_draw_rect(canvas, cx - radius, cy - radius, diameter, diameter, &marker);
+
+    if (excl) {
+      lv_point_t d1[2] = {{x0, y0}, {x1, y1}};
+      lv_point_t d2[2] = {{x0, y1}, {x1, y0}};
+      lv_canvas_draw_line(canvas, d1, 2, &line);
+      lv_canvas_draw_line(canvas, d2, 2, &line);
+    }
+
+    lv_draw_label_dsc_t lbl;
+    lv_draw_label_dsc_init(&lbl);
+    lbl.color = lv_color_white();
+    lbl.font = scale_font(14);
+    lbl.align = LV_TEXT_ALIGN_CENTER;
+    // the number centred on the marker: a marker-wide box, one line high
+    lv_canvas_draw_text(canvas, cx - radius, cy - lv_font_get_line_height(lbl.font) / 2, diameter, &lbl,
+                        std::to_string(idx + 1).c_str());
+    idx++;
+  }
+
+  auto hex = [](lv_color_t c) { return fmt::format("{:06x}", lv_color_to32(c) & 0xffffff); };
+  lv_label_set_text(status_label,
+                    fmt::format("#{} Printing now#\n"
+                                "#{} Hold to exclude#\n"
+                                "#{} Excluded#\n\n"
+                                "{} object(s), {} excluded",
+                                hex(OBJ_PRINTING()), hex(OBJ_PENDING()), hex(OBJ_EXCLUDED()),
+                                static_cast<int>(objects.size()), n_excluded).c_str());
+}
+
+void ExcludeObjectPanel::handle_canvas_event(lv_event_t *e) {
+  if (confirm_mbox != nullptr) {
+    return;
+  }
+
+  lv_indev_t *indev = lv_indev_get_act();
+  if (indev == NULL) {
+    return;
+  }
+
+  lv_point_t point;
+  lv_indev_get_point(indev, &point);
+
+  lv_area_t coords;
+  lv_obj_get_coords(canvas, &coords);
+
+  const lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_PRESSED) {
+    press_on_canvas = _lv_area_is_point_on(&coords, &point, 0);
+    dragged = false;
+    long_pressed = false;
+    press_point = point;
+    press_view_x = view_x;
+    press_view_y = view_y;
+    return;
+  }
+
+  if (!press_on_canvas) {
+    return;
+  }
+
+  if (code == LV_EVENT_PRESSING) {
+    const lv_coord_t dx = point.x - press_point.x;
+    const lv_coord_t dy = point.y - press_point.y;
+    if (!dragged && zoom > 1.0 && (std::abs(dx) > scale_r(10) || std::abs(dy) > scale_r(10))) {
+      dragged = true;
+    }
+
+    if (dragged) {
+      view_x = press_view_x - dx / px_per_mm();
+      view_y = press_view_y + dy / px_per_mm();
+      clamp_view();
+      redraw();
+    }
+    return;
+  }
+
+  // a drag only moves the view, and the release after a long press is not a tap
+  if (dragged || (code == LV_EVENT_RELEASED && long_pressed)) {
+    return;
+  }
+
+  const lv_point_t on_canvas = {static_cast<lv_coord_t>(press_point.x - coords.x1),
+                                static_cast<lv_coord_t>(press_point.y - coords.y1)};
+  const ObjBox *hit = hit_test(on_canvas);
+  if (code == LV_EVENT_LONG_PRESSED) {
+    long_pressed = true;
+    if (hit != nullptr) {
+      selected_name = hit->name;
+      ObjBox obj = *hit;
+      redraw();
+      confirm_exclude(obj);
+    }
+  } else if (code == LV_EVENT_RELEASED) {
+    selected_name = hit != nullptr ? hit->name : "";
+    redraw();
+  }
+}
+
+void ExcludeObjectPanel::handle_zoom(lv_event_t *e) {
+  if (lv_event_get_current_target(e) == zoom_out_btn) {
+    set_zoom(zoom / 2.0);
+    return;
+  }
+
+  // zoom in on the highlighted object, otherwise on the middle of all of them
+  bool found = false;
+  double x0 = 0.0, y0 = 0.0, x1 = 0.0, y1 = 0.0;
+  for (auto &b : obj_boxes) {
+    if (!selected_name.empty() && b.name != selected_name) {
+      continue;
+    }
+    x0 = found ? std::min(x0, b.mx) : b.mx;
+    y0 = found ? std::min(y0, b.my) : b.my;
+    x1 = found ? std::max(x1, b.mx) : b.mx;
+    y1 = found ? std::max(y1, b.my) : b.my;
+    found = true;
+  }
+
+  if (found) {
+    view_x = (x0 + x1) / 2.0;
+    view_y = (y0 + y1) / 2.0;
+  }
+  set_zoom(zoom * 2.0);
+}
+
+const ExcludeObjectPanel::ObjBox *ExcludeObjectPanel::hit_test(const lv_point_t &point) {
+  const lv_coord_t cx = point.x;
+  const lv_coord_t cy = point.y;
+  const ObjBox *hit = nullptr;
+  long best_area = 0;
+  for (auto &b : obj_boxes) {
+    if (b.excluded) {
+      continue;
+    }
+
+    if (point_in_polygon(cx, cy, b.polygon) || point_in_circle(cx, cy, b.cx, b.cy, b.radius)) {
+      long area = static_cast<long>(std::max<lv_coord_t>(b.x1 - b.x0, 1))
+        * static_cast<long>(std::max<lv_coord_t>(b.y1 - b.y0, 1));
+      if (hit == nullptr || area < best_area) {
+        hit = &b;
+        best_area = area;
+      }
+    }
+  }
+
+  return hit;
+}
+
+void ExcludeObjectPanel::confirm_exclude(const ObjBox &obj) {
+  pending_name = obj.name;
+
+  auto cur = State::get_instance()->get_data("/printer_state/exclude_object/current_object"_json_pointer);
+  bool printing_now = cur.is_string() && cur.template get<std::string>() == obj.name;
+  std::string msg = printing_now
+    ? fmt::format(fmt::runtime(::tr("Stop printing object {}?\nThis cannot be undone.")), obj.number)
+    : fmt::format(fmt::runtime(::tr("Exclude object {}?\nThis cannot be undone.")), obj.number);
+
+  static const char *btns[] = {::tr("Cancel"), ::tr("Exclude"), ""};
+  SimpleDialogOptions options{};
+  options.buttons = btns;
+  options.error = true;
+  options.auto_close = true;
+  options.highlighted_button_idx = 1;
+  options.result_cb = handle_exclude_dialog_result;
+  options.user_data = this;
+  confirm_mbox = create_configurable_dialog(lv_scr_act(), ::tr("Exclude Object"), msg.c_str(), options);
+}
+
+void ExcludeObjectPanel::do_exclude() {
+  if (pending_name.empty()) {
+    return;
+  }
+
+  LOG_INFO("excluding object {}", pending_name);
+  ws.gcode_script(fmt::format("EXCLUDE_OBJECT NAME={}", pending_name));
+  pending_name.clear();
+}
+
+void ExcludeObjectPanel::handle_dialog_result(uint32_t button_idx) {
+  confirm_mbox = nullptr;
+  if (button_idx == 1) {
+    do_exclude();
+  } else {
+    pending_name.clear();
+  }
+}
+
+void ExcludeObjectPanel::handle_callback(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+    return;
+  }
+
+  lv_obj_t *btn = lv_event_get_current_target(e);
+  if (btn == back_btn.get_container()) {
+    is_foreground = false;
+    lv_obj_move_background(panel_cont);
+  }
+}

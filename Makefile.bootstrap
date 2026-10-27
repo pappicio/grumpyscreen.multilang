@@ -1,0 +1,148 @@
+ifdef CROSS_COMPILE
+CC 	= $(CROSS_COMPILE)gcc
+CXX = $(CROSS_COMPILE)g++
+CPP = $(CC) -E
+AS 	= $(CROSS_COMPILE)as
+LD	= $(CROSS_COMPILE)ld
+AR	= $(CROSS_COMPILE)ar
+NM	= $(CROSS_COMPILE)nm
+STRIP 	= $(CROSS_COMPILE)strip
+OBJCOPY 	= $(CROSS_COMPILE)objcopy
+endif
+
+STRIP ?= strip
+
+LVGL_DIR_NAME 	?= lvgl
+LVGL_DIR 		?= .
+
+WARNINGS		:= -Wall -Wextra -Wno-unused-function -Wno-error=strict-prototypes -Wpointer-arith \
+					-fno-strict-aliasing -Wno-error=cpp -Wuninitialized -Wmaybe-uninitialized -Wno-unused-parameter -Wno-missing-field-initializers -Wtype-limits -Wsizeof-pointer-memaccess \
+					-Wno-format-nonliteral -Wno-cast-qual -Wunreachable-code -Wno-switch-default -Wreturn-type -Wmultichar -Wformat-security -Wno-error=pedantic \
+					-Wno-sign-compare -Wdouble-promotion -Wclobbered -Wempty-body -Wtype-limits -Wshift-negative-value
+CFLAGS 			?= -O3 -g0 -MD -MP -I$(LVGL_DIR)/ $(WARNINGS)
+DEPS_KEY		?= $(if $(CROSS_COMPILE),$(patsubst %-,%,$(CROSS_COMPILE)),native)
+DEPS_DIR		?= build/deps/$(DEPS_KEY)
+DEPS_LIB_DIR	= $(DEPS_DIR)/lib
+LIBHV_A			= $(DEPS_LIB_DIR)/libhv.a
+WPA_CLIENT_A	= $(DEPS_LIB_DIR)/libwpa_client.a
+LIBHV_INPUTS	:= $(shell find libhv \( -path libhv/include -o -path libhv/lib \) -prune -o -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name 'Makefile*' -o -name 'config.mk' \) -print)
+WPA_CLIENT_INPUTS := $(shell find wpa_supplicant -type f \( -name '*.c' -o -name '*.h' -o -name 'Makefile*' -o -name '.config' \))
+LDFLAGS 		?= -static -lm -L$(DEPS_LIB_DIR) -l:libhv.a -latomic -lpthread -L$(DEPS_LIB_DIR) -l:libwpa_client.a -lstdc++fs
+BIN 			= bootstrap
+BUILD_DIR 		?= ./build-bootstrap
+BUILD_OBJ_DIR 	= $(BUILD_DIR)/obj
+BUILD_BIN_DIR 	= $(BUILD_DIR)/bin
+
+BOOTSTRAP_SRC = \
+	$(LVGL_DIR)/src/bootstrap/main.cpp \
+	$(LVGL_DIR)/src/net_utils.cpp \
+	$(LVGL_DIR)/src/button_container.cpp \
+	$(LVGL_DIR)/src/theme.cpp \
+	$(LVGL_DIR)/src/wifi_panel.cpp \
+	$(LVGL_DIR)/src/wpa_event.cpp
+
+include $(LVGL_DIR)/lvgl/lvgl.mk
+include $(LVGL_DIR)/lv_drivers/lv_drivers.mk
+CSRCS			:= $(filter-out $(LVGL_DIR)/lv_drivers/wayland/%.c,$(CSRCS))
+
+CSRCS 			+= $(wildcard $(LVGL_DIR)/assets/*.c)
+ifdef GUPPY_CALIBRATE
+CSRCS			+= $(wildcard $(LVGL_DIR)/lv_touch_calibration/*.c)
+DEFINES			+= -D GUPPY_CALIBRATE
+DEFINES			+= -D EVDEV_CALIBRATE
+endif
+
+ASSET_DIR		= material
+ifdef GUPPY_SMALL_SCREEN
+ASSET_DIR		= material_46
+DEFINES			+= -D GUPPY_SMALL_SCREEN
+endif
+
+CSRCS 			+= $(wildcard $(LVGL_DIR)/assets/$(ASSET_DIR)/*.c)
+
+ifdef GUPPYSCREEN_VERSION
+DEFINES			+= -D GUPPYSCREEN_VERSION=\"$(GUPPYSCREEN_VERSION)\"
+else
+DEFINES			+= -D GUPPYSCREEN_VERSION=\"unknown\"
+endif
+
+OBJEXT 			?= .o
+
+AOBJS 			= $(ASRCS:.S=$(OBJEXT))
+COBJS 			= $(CSRCS:.c=$(OBJEXT))
+MAINOBJ 		= $(BOOTSTRAP_SRC:.cpp=$(OBJEXT))
+DEPS            = $(addprefix $(BUILD_OBJ_DIR)/, $(patsubst %.o, %.d, $(MAINOBJ)))
+OBJS 			= $(AOBJS) $(COBJS) $(MAINOBJ)
+TARGET 			= $(addprefix $(BUILD_OBJ_DIR)/, $(patsubst ./%, %, $(OBJS)))
+
+INC 			:= -I./ -I./src -I./lvgl/ -I./lv_touch_calibration -I./fmt/include -I$(DEPS_DIR)/include -I./wpa_supplicant/src/common
+LDLIBS	 		:= -lm
+DEFINES			+= -D _GNU_SOURCE -DSPDLOG_COMPILED_LIB -D GUPPY_BOOTSTRAP
+
+ifdef GUPPY_SDL
+SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
+SDL_LIBS := $(shell pkg-config --libs sdl2 2>/dev/null)
+ifeq ($(strip $(SDL_LIBS)),)
+SDL_LIBS := -lSDL2
+endif
+LDFLAGS				:= -no-pie $(filter-out -static,$(LDFLAGS))
+INC					+= $(SDL_CFLAGS)
+LDFLAGS				+= $(SDL_LIBS)
+DEFINES				+= -D GUPPY_SDL -D USE_SDL=1
+ifdef GUPPY_SMALL_SCREEN
+DEFINES				+= -D SDL_HOR_RES=480 -D SDL_VER_RES=272
+else
+DEFINES				+= -D SDL_HOR_RES=800 -D SDL_VER_RES=480
+endif
+endif
+
+COMPILE_CC		= $(CC) $(CFLAGS) $(INC) $(DEFINES)
+COMPILE_CXX	= $(CXX) $(CFLAGS) $(INC) $(DEFINES)
+
+all: default
+
+libhv.a: $(LIBHV_A)
+
+wpaclient: $(WPA_CLIENT_A)
+
+$(LIBHV_A): $(LIBHV_INPUTS)
+	$(MAKE) -C libhv clean
+	$(MAKE) -C libhv -j$$(nproc) libhv
+	@mkdir -p $(DEPS_LIB_DIR)
+	@cp libhv/lib/libhv.a $(LIBHV_A)
+	@cp -r libhv/include $(DEPS_DIR)/
+
+$(WPA_CLIENT_A): $(WPA_CLIENT_INPUTS)
+	$(MAKE) -C wpa_supplicant/wpa_supplicant clean
+	$(MAKE) -C wpa_supplicant/wpa_supplicant -j$$(nproc) libwpa_client.a
+	@mkdir -p $(DEPS_LIB_DIR)
+	@cp wpa_supplicant/wpa_supplicant/libwpa_client.a $(WPA_CLIENT_A)
+
+$(BUILD_OBJ_DIR)/%.o: %.cpp | $(LIBHV_A)
+	@mkdir -p $(dir $@)
+	@$(COMPILE_CXX) -std=c++17 $(CFLAGS) -c $< -o $@
+	@echo "CXX $<"
+
+$(BUILD_OBJ_DIR)/%.o: %.c | $(LIBHV_A)
+	@mkdir -p $(dir $@)
+	@$(COMPILE_CC) $(CFLAGS) -c $< -o $@
+	@echo "CC $<"
+
+default: libhv.a wpaclient $(TARGET)
+	@mkdir -p $(dir $(BUILD_BIN_DIR)/)
+	$(CXX) -o $(BUILD_BIN_DIR)/$(BIN) $(TARGET) $(LDFLAGS) $(LDLIBS)
+	@$(STRIP) $(BUILD_BIN_DIR)/$(BIN)
+
+libhvclean:
+	$(MAKE) -C libhv clean
+	rm -f $(LIBHV_A)
+	rm -rf $(DEPS_DIR)/include
+
+wpaclean:
+	$(MAKE) -C wpa_supplicant/wpa_supplicant clean
+	rm -f $(WPA_CLIENT_A)
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+-include $(DEPS)
