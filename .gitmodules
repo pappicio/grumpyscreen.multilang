@@ -1,0 +1,15 @@
+[submodule "lvgl"]
+    path = lvgl
+    url = https://github.com/pappicio/lvgl-cjk.git
+
+[submodule "lv_drivers"]
+    path = lv_drivers
+    url = https://github.com/pellcorp/lv_drivers.git
+
+[submodule "libhv"]
+    path = libhv
+    url = https://github.com/ithewei/libhv.git
+
+[submodule "fmt"]
+    path = fmt
+    url = https://github.com/fmtlib/fmt.git
