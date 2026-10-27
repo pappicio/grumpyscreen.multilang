@@ -8,6 +8,9 @@ cd 'project folder'
 
 make CROSS_COMPILE=/home/ubuntu/ingenic-toolchain/mips-xburst2-linux-toolchain-r6.0.0/bin/mips-xburst2-linux-gnu- release-zip
 
+in /build/ folder you can find /release/ folder and grumpyscreen-release.zip file ready to share
+
+
 ## Features
 
 :white_check_mark: Setup Wifi  
