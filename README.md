@@ -2,6 +2,13 @@
 
 Grumpyscreen is a fork of GuppyScreen specifically for Simple AF and OpenCentauri Cosmos
 
+# to compile:
+
+cd <project folder>
+
+make CROSS_COMPILE=/home/ubuntu/ingenic-toolchain/mips-xburst2-linux-toolchain-r6.0.0/bin/mips-xburst2-linux-gnu- -j2
+
+
 ## Features
 
 :white_check_mark: Setup Wifi  
