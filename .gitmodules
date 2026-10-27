@@ -1,6 +1,6 @@
 [submodule "lvgl"]
     path = lvgl
-    url = https://github.com/pappicio/lvgl-cjk.git
+    url = https://github.com/lvgl/lvgl.git
 
 [submodule "lv_drivers"]
     path = lv_drivers
