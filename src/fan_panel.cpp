@@ -1,4 +1,5 @@
 #include "fan_panel.h"
+#include "config.h"
 #include "i18n.h"
 #include "state.h"
 #include "utils.h"
@@ -66,9 +67,16 @@ void FanPanel::consume(json &j) {
 void FanPanel::create_fans(json &f) {
   std::lock_guard<std::mutex> lock(lv_lock);
   fans.clear();
+  const bool show_automatic_fans =
+      Config::get_instance()->get<bool>("/ui/show_automatic_fans", true);
 
   for (auto &fan : f.items()) {
     std::string key = fan.key();
+    if (!show_automatic_fans &&
+        (key.rfind("heater_fan ", 0) == 0 ||
+         key.rfind("controller_fan ", 0) == 0)) {
+      continue;
+    }
     if (get_log_level() <= LogLevel::TRACE) {
       LOG_TRACE("create fan {}, {}", f.dump(), fan.value().dump());
     }
