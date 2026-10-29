@@ -756,6 +756,24 @@ void MmuPanel::rebuild_grid(size_t page_count) {
     lv_obj_set_flex_align(card.cont, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     card.spool = lv_obj_create(card.cont);
+    card.pie = lv_arc_create(card.spool);
+    {
+      int pd = spool_diam - 2 * spool_rim();
+      lv_obj_set_size(card.pie, pd, pd);
+      lv_obj_center(card.pie);
+      lv_obj_add_flag(card.pie, LV_OBJ_FLAG_IGNORE_LAYOUT);
+      lv_obj_clear_flag(card.pie, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_remove_style(card.pie, NULL, LV_PART_KNOB);
+      lv_obj_set_style_pad_all(card.pie, 0, 0);
+      lv_obj_set_style_bg_opa(card.pie, LV_OPA_TRANSP, 0);
+      lv_obj_set_style_border_width(card.pie, 0, 0);
+      lv_obj_set_style_arc_opa(card.pie, LV_OPA_TRANSP, LV_PART_MAIN);
+      lv_obj_set_style_arc_width(card.pie, pd, LV_PART_INDICATOR);  // oltre il raggio: LVGL lo limita, esce una fetta piena
+      lv_obj_set_style_arc_rounded(card.pie, false, LV_PART_INDICATOR);
+      lv_arc_set_rotation(card.pie, 270);  // 0 gradi alle ore 12
+      lv_arc_set_bg_angles(card.pie, 0, 360);
+      lv_obj_add_flag(card.pie, LV_OBJ_FLAG_HIDDEN);
+    }
     card.hole = lv_obj_create(card.spool);
     style_spool_icon(card.spool, card.hole, spool_diam);
 
@@ -853,6 +871,16 @@ void MmuPanel::populate() {
     bool backup = is_backup_slot((int)slot_idx);
 
     paint_spool_icon(card.spool, card.hole, colour, colour_valid, has_filament);
+    if (has_filament && slot.initial_weight > 0 && Config::get_instance()->get<bool>("/ui/spool_pie", true)) {
+      int pct = (int)(slot.weight * 100.0 / slot.initial_weight + 0.5);
+      pct = std::max(0, std::min(100, pct));
+      lv_obj_set_style_bg_color(card.spool, col(BORDER_DIM), 0);  // parte consumata
+      lv_obj_set_style_arc_color(card.pie, colour, LV_PART_INDICATOR);
+      lv_arc_set_angles(card.pie, 0, pct * 360 / 100);
+      lv_obj_clear_flag(card.pie, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(card.pie, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // Line 1: slot and tool (e.g. "S1 (T0)", "S1 (T0) (B)")
     std::string tool_str = slot_label(slot, slot_idx);
@@ -864,6 +892,15 @@ void MmuPanel::populate() {
     // physically empty (the translucent spool conveys emptiness); bare slots say "Empty"
     std::string mat_line = !slot.material.empty() ? slot.material : has_filament ? "-" : ::tr("Empty");
     if (spoolman_active && slot.spool_id >= 0) mat_line += fmt::format(" #{}", slot.spool_id);
+    {
+      std::string mode = Config::get_instance()->get<std::string>("/ui/spool_remaining", std::string("percent"));
+      if (mode == "percent" && slot.initial_weight > 0) {
+        int pct = (int)(slot.weight * 100.0 / slot.initial_weight + 0.5);
+        mat_line += fmt::format(" {}%", std::max(0, std::min(100, pct)));
+      } else if (mode != "off" && slot.weight > 0) {
+        mat_line += fmt::format(" {} g", slot.weight);
+      }
+    }
     lv_label_set_text(card.material, mat_line.c_str());
 
     // the loaded lane outlines itself in the accent, a step heavier than the

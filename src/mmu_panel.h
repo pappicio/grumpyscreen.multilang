@@ -103,6 +103,7 @@ class MmuPanel : public NotifyConsumer {
     lv_obj_t *cont;
     lv_obj_t *spool;
     lv_obj_t *hole;
+    lv_obj_t *pie;
     lv_obj_t *title;
     lv_obj_t *material;
   };

@@ -17,6 +17,7 @@ struct MmuSlot {
   std::string colour;    // "RRGGBB", "" when unset
   int backup = -1;       // slot index that takes over when this one runs out
   int weight = 0;        // grams remaining (spoolman), 0 = unknown
+  int initial_weight = 0; // grams when new (spoolman), 0 = unknown
   bool prepped = false;  // filament physically present at the slot
   bool ready = false;    // fed into the unit, ready to load
   bool tool_loaded = false;

@@ -166,6 +166,7 @@ void AfcBackend::refresh() {
       if (st.contains("load") && st["load"].is_boolean()) slot.ready = st["load"].template get<bool>();
       if (st.contains("tool_loaded") && st["tool_loaded"].is_boolean()) slot.tool_loaded = st["tool_loaded"].template get<bool>();
       if (st.contains("weight") && st["weight"].is_number()) slot.weight = st["weight"].template get<int>();
+      if (st.contains("initial_weight") && st["initial_weight"].is_number()) slot.initial_weight = st["initial_weight"].template get<int>();
       // A lane with a spoolman spool assigned has its colour and material
       // refetched from spoolman at every PREP, so a local edit here would
       // apply and then quietly revert. Spoolman owns it; edit it there.
