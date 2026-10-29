@@ -27,6 +27,7 @@ class SensorContainer {
   void set_enabled(bool enabled);
   void update_target(int new_target);
   void update_value(int new_value);
+  void set_object(const std::string &new_id, const char *label_text);
   void update_series(int value);
   void handle_edit(lv_event_t *event);
 

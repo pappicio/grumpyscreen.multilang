@@ -22,6 +22,7 @@ class ExtruderPanel : public NotifyConsumer {
   void enable_spoolman();
   void show_spoolman(bool shown);
   void consume(json &j);
+  void init_active_tool(json &j);
   void handle_callback(lv_event_t *e);
 
   static void _handle_callback(lv_event_t *event) {

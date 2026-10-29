@@ -181,3 +181,8 @@ void SensorContainer::handle_edit(lv_event_t *e) {
     numpad.foreground_reset();
   }
 }
+
+void SensorContainer::set_object(const std::string &new_id, const char *label_text) {
+  id = new_id;
+  if (label_text != nullptr && sensor_label != nullptr) lv_label_set_text(sensor_label, label_text);
+}

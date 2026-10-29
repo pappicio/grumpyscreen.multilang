@@ -145,6 +145,7 @@ void MainPanel::remove_tab_change_cb(lv_event_cb_t cb, void *user_data) {
 
 void MainPanel::init(json &j) {
   std::lock_guard<std::mutex> lock(lv_lock);
+  extruder_panel.init_active_tool(j);
   for (const auto &el : sensors) {
     auto target_value = j[json::json_pointer(fmt::format("/result/status/{}/target", el.first))];
     if (!target_value.is_null()) {

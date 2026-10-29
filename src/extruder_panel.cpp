@@ -5,6 +5,7 @@
 #include "logger.h"
 #include "icons.h"
 #include "theme.h"
+#include "simple_dialog.h"
 
 using namespace Theme;
 
@@ -92,6 +93,36 @@ uint32_t resolve_default_idx(const std::string &config_key,
 
 } // namespace
 
+static lv_obj_t *g_tool_row = nullptr;
+static int g_tool_count = 0;
+static std::string g_active_ext = "extruder";
+static std::vector<std::string> g_tool_names;
+static std::vector<const char *> g_tool_map;
+static std::string g_unload_macro;
+
+static void update_tool_selection(const std::string &name) {
+  if (g_tool_row == nullptr) return;
+
+  lv_btnmatrix_clear_btn_ctrl_all(g_tool_row, LV_BTNMATRIX_CTRL_CHECKED);
+
+  int idx = -1;
+  if (name == "extruder") {
+    idx = 0;
+  } else if (name.rfind("extruder", 0) == 0) {
+    const std::string suffix = name.substr(8);
+    if (!suffix.empty() &&
+        std::all_of(suffix.begin(), suffix.end(),
+                    [](unsigned char c) { return std::isdigit(c); })) {
+      idx = std::atoi(suffix.c_str());
+    }
+  }
+
+  if (idx >= 0 && idx < g_tool_count) {
+    lv_btnmatrix_set_btn_ctrl(g_tool_row, idx, LV_BTNMATRIX_CTRL_CHECKED);
+  }
+}
+
+
 ExtruderPanel::ExtruderPanel(KWebSocketClient &websocket_client,
 			     std::mutex &lock,
 			     Numpad &numpad,
@@ -145,6 +176,189 @@ ExtruderPanel::ExtruderPanel(KWebSocketClient &websocket_client,
   lv_obj_set_grid_cell(extruder_temp.get_sensor(), LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_START, 0, 1);
   lv_obj_set_grid_cell(tabview, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
   lv_obj_set_grid_cell(right_col, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 2);
+
+  // Genera i pulsanti dagli estrusori dichiarati nel CFG.
+  {
+    Config *conf = Config::get_instance();
+    const auto &configured_sensors = conf->get_objects("/monitored_sensor");
+
+    g_unload_macro.clear();
+    int unload_macro_matches = 0;
+
+    for (const auto &macro : conf->get_objects("/macro")) {
+      if (macro.value("unload_tool", false)) {
+        ++unload_macro_matches;
+        g_unload_macro = macro.value("id", std::string());
+      }
+    }
+
+    if (unload_macro_matches != 1 || g_unload_macro.empty()) {
+      if (unload_macro_matches > 1) {
+        LOG_ERROR("Multiple macros configured with unload_tool=true; deposit button disabled");
+      }
+      g_unload_macro.clear();
+    }
+
+    std::vector<std::pair<int, std::string>> tools;
+
+    for (const auto &sensor : configured_sensors) {
+      if (!sensor.contains("id") || !sensor["id"].is_string()) continue;
+
+      const std::string name = sensor["id"].get<std::string>();
+      int idx = -1;
+
+      if (name == "extruder") {
+        idx = 0;
+      } else if (name.rfind("extruder", 0) == 0) {
+        const std::string suffix = name.substr(8);
+        if (!suffix.empty() &&
+            std::all_of(suffix.begin(), suffix.end(),
+                        [](unsigned char c) { return std::isdigit(c); })) {
+          idx = std::atoi(suffix.c_str());
+        }
+      }
+
+      if (idx >= 0 && idx < 8) {
+        tools.emplace_back(idx, name);
+      }
+    }
+
+    std::sort(tools.begin(), tools.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+
+    g_tool_names.clear();
+    g_tool_map.clear();
+
+    for (const auto &tool : tools) {
+      g_tool_names.push_back("T" + std::to_string(tool.first));
+    }
+
+    g_tool_count = static_cast<int>(g_tool_names.size());
+
+    if (g_tool_count > 0) {
+      for (auto &name : g_tool_names) g_tool_map.push_back(name.c_str());
+
+      if (!g_unload_macro.empty()) {
+        g_tool_map.push_back(">Tx");
+      }
+
+      g_tool_map.push_back("");
+
+      g_tool_row = lv_btnmatrix_create(panel_cont);
+      lv_btnmatrix_set_map(g_tool_row, g_tool_map.data());
+      lv_btnmatrix_set_btn_ctrl_all(g_tool_row, LV_BTNMATRIX_CTRL_CHECKABLE);
+      lv_btnmatrix_set_one_checked(g_tool_row, true);
+      lv_obj_add_style(g_tool_row, &Theme::styles().key_tray, 0);
+      lv_obj_set_height(g_tool_row, scale_r(40));
+
+      static lv_coord_t grid_panel_row_tools_dsc[] = {
+        LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST
+      };
+      lv_obj_set_grid_dsc_array(panel_cont, grid_panel_col_dsc, grid_panel_row_tools_dsc);
+      lv_obj_set_grid_cell(g_tool_row, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_START, 1, 1);
+      lv_obj_set_grid_cell(tabview, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 2, 1);
+      lv_obj_set_grid_cell(right_col, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 3);
+
+      lv_obj_add_event_cb(g_tool_row, [](lv_event_t *e) {
+        if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+
+        auto *self = static_cast<ExtruderPanel *>(lv_event_get_user_data(e));
+        uint32_t idx = lv_btnmatrix_get_selected_btn(lv_event_get_target(e));
+
+        // Il pulsante >Tx è dopo tutti gli utensili.
+        if (idx == static_cast<uint32_t>(g_tool_count)) {
+          if (g_unload_macro.empty()) return;
+
+          const std::string active_heater = g_active_ext;
+
+          // Accetta soltanto nomi di estrusori Klipper validi.
+          bool valid_heater = active_heater == "extruder";
+
+          if (active_heater.rfind("extruder", 0) == 0 &&
+              active_heater != "extruder") {
+            const std::string suffix = active_heater.substr(8);
+            valid_heater = !suffix.empty() &&
+                std::all_of(suffix.begin(), suffix.end(),
+                    [](unsigned char c) { return std::isdigit(c); });
+          }
+
+          if (!valid_heater) {
+            LOG_ERROR("Invalid active extruder '{}'; deposit cancelled", active_heater);
+            update_tool_selection(g_active_ext);
+            return;
+          }
+
+          struct UnloadConfirmData {
+            ExtruderPanel *panel;
+            std::string macro;
+            std::string heater;
+          };
+
+          static const char *buttons[] = {::tr("Yes"), ::tr("No"), ""};
+
+          SimpleDialogOptions options{};
+          options.buttons = buttons;
+          options.auto_close = true;
+          options.highlighted_button_idx = 0;
+          options.user_data = new UnloadConfirmData{
+            self, g_unload_macro, active_heater
+          };
+
+          options.result_cb = [](lv_obj_t *, uint32_t button_idx, void *user_data) {
+            auto *data = static_cast<UnloadConfirmData *>(user_data);
+            if (data == nullptr) return;
+
+            if (button_idx == 0) {
+              const std::string command = fmt::format(
+                  "{}\nSET_HEATER_TEMPERATURE HEATER={} TARGET=0",
+                  data->macro, data->heater);
+              data->panel->ws.gcode_script(command);
+            } else {
+              update_tool_selection(g_active_ext);
+            }
+
+            delete data;
+          };
+
+          std::string message = ::tr("Deposit selected tool?");
+          create_configurable_dialog(lv_scr_act(), ::tr("Select tool"),
+                                     message.c_str(), options);
+          return;
+        }
+
+        if (idx >= static_cast<uint32_t>(g_tool_count)) return;
+
+        struct ToolConfirmData {
+          ExtruderPanel *panel;
+          uint32_t index;
+        };
+
+        static const char *buttons[] = {::tr("Yes"), ::tr("No"), ""};
+        SimpleDialogOptions options{};
+        options.buttons = buttons;
+        options.auto_close = true;
+        options.highlighted_button_idx = 0;
+        options.user_data = new ToolConfirmData{self, idx};
+        options.result_cb = [](lv_obj_t *, uint32_t button_idx, void *user_data) {
+          auto *data = static_cast<ToolConfirmData *>(user_data);
+          if (data == nullptr) return;
+
+          if (button_idx == 0) {
+            data->panel->ws.gcode_script(fmt::format("T{}", data->index));
+          } else {
+            update_tool_selection(g_active_ext);
+          }
+
+          delete data;
+        };
+
+        std::string message = fmt::format(::tr("Select tool T{}?"), idx);
+        create_configurable_dialog(lv_scr_act(), ::tr("Select tool"),
+                                   message.c_str(), options);
+      }, LV_EVENT_VALUE_CHANGED, this);
+    }
+  }
+
   for (lv_obj_t *tab : {load_tab, extrude_tab}) {
     lv_obj_set_style_pad_all(tab, 0, 0);
   }
@@ -226,18 +440,55 @@ void ExtruderPanel::show_spoolman(bool shown) {
   else lv_obj_add_flag(spoolman_btn.get_container(), LV_OBJ_FLAG_HIDDEN);
 }
 
+void ExtruderPanel::init_active_tool(json &j) {
+  json &active_ext = j["/result/status/toolhead/extruder"_json_pointer];
+  if (!active_ext.is_string()) return;
+
+  std::string name = active_ext.get<std::string>();
+  g_active_ext = name;
+  extruder_temp.set_object(name, name.c_str());
+
+  json &st = j[json::json_pointer("/result/status/" + name)];
+  if (st.is_object()) {
+    if (st.contains("target") && st["target"].is_number())
+      extruder_temp.update_target(st["target"].get<int>());
+    if (st.contains("temperature") && st["temperature"].is_number())
+      extruder_temp.update_value(st["temperature"].get<int>());
+  }
+
+  update_tool_selection(name);
+}
+
 void ExtruderPanel::consume(json& j) {
   std::lock_guard<std::mutex> lock(lv_lock);
-  auto target_value = j["/params/0/extruder/target"_json_pointer];
+  auto target_value = j[json::json_pointer("/params/0/" + g_active_ext + "/target")];
   if (!target_value.is_null()) {
     int target = target_value.template get<int>();
     extruder_temp.update_target(target);
   }
 
-  auto temp_value = j["/params/0/extruder/temperature"_json_pointer];
+  auto temp_value = j[json::json_pointer("/params/0/" + g_active_ext + "/temperature")];
   if (!temp_value.is_null()) {
     int value = temp_value.template get<int>();
     extruder_temp.update_value(value);
+  }
+
+  json &active_ext = j["/params/0/toolhead/extruder"_json_pointer];
+  if (active_ext.is_string()) {
+    std::string name = active_ext.template get<std::string>();
+    if (name != g_active_ext) {
+      // il tool attivo e' cambiato: nome, temperatura e target seguono il nuovo riscaldatore
+      g_active_ext = name;
+      extruder_temp.set_object(name, name.c_str());
+      json &st = State::get_instance()->get_data(json::json_pointer("/printer_state/" + name));
+      if (st.is_object()) {
+        if (st.contains("target") && st["target"].is_number()) extruder_temp.update_target(st["target"].template get<int>());
+        if (st.contains("temperature") && st["temperature"].is_number()) extruder_temp.update_value(st["temperature"].template get<int>());
+      }
+    }
+    if (g_tool_row != nullptr) {
+      update_tool_selection(name);
+    }
   }
 
   json &pstat_state = j["/params/0/print_stats/state"_json_pointer];
