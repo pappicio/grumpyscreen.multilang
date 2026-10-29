@@ -133,6 +133,13 @@ lv_obj_t *SliderContainer::get_max() {
   return max_btn.get_container();
 }
 
+void SliderContainer::set_read_only() {
+  lv_obj_add_state(slider, LV_STATE_DISABLED);
+  off_btn.disable();
+  max_btn.disable();
+}
+
+
 void SliderContainer::set_range(int min_range, int max_range) {
   lv_slider_set_range(slider, min_range, max_range);
 }

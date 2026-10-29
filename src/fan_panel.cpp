@@ -84,6 +84,10 @@ void FanPanel::create_fans(json &f) {
     // a row is as tall as its controls: rows start at the top, one gap apart
     fans.insert({key, std::make_shared<SliderContainer>(fans_cont, display_name.c_str(), Icons::CANCEL, "Off",
 						  Icons::FAN_ON, "Max", fan_cb, this, "%")});
+    if (key.rfind("heater_fan ", 0) == 0 ||
+        key.rfind("controller_fan ", 0) == 0) {
+      fans.at(key)->set_read_only();
+    }
   }
 
   // Any number of rows, any screen size: build them, then let the scroller
@@ -125,6 +129,10 @@ void FanPanel::handle_callback(lv_event_t *event) {
   } else if (btn == all_off_btn.get_container() || btn == all_on_btn.get_container()) {
     const bool on = btn == all_on_btn.get_container();
     for (auto &f : fans) {
+      if (f.first.rfind("heater_fan ", 0) == 0 ||
+          f.first.rfind("controller_fan ", 0) == 0) {
+        continue;
+      }
       ws.gcode_script(fan_gcode(f.first, on ? 1.0 : 0.0));
       f.second->update_value(on ? 100 : 0);
     }
@@ -218,6 +226,10 @@ void FanPanel::handle_fan_update_generic(lv_event_t *event) {
 
     LOG_DEBUG("updating fan speed to {}", pct);
     for (auto &f : fans) {
+      if (f.first.rfind("heater_fan ", 0) == 0 ||
+          f.first.rfind("controller_fan ", 0) == 0) {
+        continue;
+      }
       if (obj == f.second->get_slider()) {
 	      std::string fan_name = KUtils::get_obj_name(f.first);
       	LOG_DEBUG("update fan {}", fan_name);
@@ -230,6 +242,10 @@ void FanPanel::handle_fan_update_generic(lv_event_t *event) {
     obj = lv_event_get_current_target(event);
 
     for (auto &f : fans) {
+      if (f.first.rfind("heater_fan ", 0) == 0 ||
+          f.first.rfind("controller_fan ", 0) == 0) {
+        continue;
+      }
       if (obj == f.second->get_off()) {
 	      std::string fan_name = KUtils::get_obj_name(f.first);
       	LOG_DEBUG("turning off fan {}", fan_name);
