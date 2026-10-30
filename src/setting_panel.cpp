@@ -60,6 +60,9 @@ static constexpr uint32_t FACTORY_RESET_DELAY_MS = 5000;
 
 static constexpr int32_t DISPLAY_SLEEP_VALUES[] = {-1, 60, 300, 600, 1800};
 static lv_obj_t *language_selector = nullptr;
+static lv_obj_t *spool_remaining_selector = nullptr;
+static std::vector<std::string> g_spool_remaining_options;
+
 static std::vector<std::string> g_lang_codes;
 static std::vector<const char *> g_lang_map;
 static const char *DISPLAY_SLEEP_MAP[] = {::tr("Never"), "1 min", "5 min", "10 min", "30 min", ""};
@@ -371,6 +374,46 @@ SettingPanel::SettingPanel(KWebSocketClient &c, std::mutex &l, lv_obj_t *parent)
                       LV_EVENT_VALUE_CHANGED, this);
 
   add_about_line(settings_panel, ::tr("Display options"), true);
+
+  // Fixed spool remaining options.
+  g_spool_remaining_options = {"percent", "grams", "off"};
+
+  std::string spool_options;
+  for (const auto &option : g_spool_remaining_options) {
+    if (!spool_options.empty()) spool_options += "\n";
+    spool_options += option;
+  }
+
+  lv_obj_t *spool_row = Theme::create_row(settings_panel);
+  lv_obj_set_size(spool_row, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_min_height(spool_row, Theme::touch_h(), 0);
+  lv_obj_set_flex_flow(spool_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(spool_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t *spool_label = lv_label_create(spool_row);
+  lv_label_set_text(spool_label, ::tr("Spool remaining"));
+  lv_obj_set_width(spool_label, 0);
+  lv_obj_set_flex_grow(spool_label, 1);
+
+  spool_remaining_selector = lv_dropdown_create(spool_row);
+  lv_dropdown_set_options(spool_remaining_selector, spool_options.c_str());
+  lv_obj_set_flex_grow(spool_remaining_selector, 1);
+
+  const std::string current_spool_remaining =
+      conf->get<std::string>("/ui/spool_remaining", "percent");
+  uint16_t spool_selected = 0;
+  for (size_t i = 0; i < g_spool_remaining_options.size(); ++i) {
+    if (g_spool_remaining_options[i] == current_spool_remaining) {
+      spool_selected = static_cast<uint16_t>(i);
+      break;
+    }
+  }
+  lv_dropdown_set_selected(spool_remaining_selector, spool_selected);
+  lv_obj_add_event_cb(spool_remaining_selector,
+                      &SettingPanel::_setting_changed_cb,
+                      LV_EVENT_VALUE_CHANGED, this);
+
   add_ui_bool_setting(settings_panel, conf, "adaptive_graph", "Adaptive temperature graph");
   add_ui_bool_setting(settings_panel, conf, "show_automatic_fans", "Show automatic fans");
   add_ui_bool_setting(settings_panel, conf, "spool_pie", "Spool pie chart");
@@ -529,6 +572,28 @@ void SettingPanel::setting_changed(lv_event_t *event) {
       const int old_idx = display_sleep_index(conf->get<int32_t>("/ui/display_sleep_sec"));
       if (old_idx >= 0) {
         lv_btnmatrix_set_btn_ctrl(sleep_timeout_selector, old_idx, LV_BTNMATRIX_CTRL_CHECKED);
+      }
+    }
+  } else if (target == spool_remaining_selector) {
+    const uint16_t selected = lv_dropdown_get_selected(spool_remaining_selector);
+
+    if (selected < g_spool_remaining_options.size()) {
+      saved = conf->set_ui_string(
+          "spool_remaining", g_spool_remaining_options[selected]);
+    }
+
+    if (saved) {
+      g_restart_required = true;
+    } else {
+      const std::string old_value =
+          conf->get<std::string>("/ui/spool_remaining", "percent");
+
+      for (size_t i = 0; i < g_spool_remaining_options.size(); ++i) {
+        if (g_spool_remaining_options[i] == old_value) {
+          lv_dropdown_set_selected(
+              spool_remaining_selector, static_cast<uint16_t>(i));
+          break;
+        }
       }
     }
   } else if (target == language_selector) {
