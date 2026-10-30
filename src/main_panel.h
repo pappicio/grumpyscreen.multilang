@@ -98,6 +98,7 @@ class MainPanel : public NotifyConsumer {
 
  private:
   void create_main(lv_obj_t *parent);
+  void update_chart_range();
   // caller holds lv_lock
   void place_spoolman();
   static void _tabview_event_cb(lv_event_t *e);
@@ -140,5 +141,7 @@ class MainPanel : public NotifyConsumer {
   ButtonContainer print_btn;
   ButtonContainer emergency_btn;
   bool klipper_ready = false;
+  bool was_printing = false;
+  bool print_state_initialized = false;
 };
 #endif // __MAIN_PANEL_H__

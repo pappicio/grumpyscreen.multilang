@@ -29,6 +29,10 @@ class SensorContainer {
   void update_value(int new_value);
   void set_object(const std::string &new_id, const char *label_text);
   void update_series(int value);
+  int get_value() const { return value; }
+  bool has_series() const { return series != nullptr; }
+  int get_series_max() const;
+  void reset_series_history();
   void handle_edit(lv_event_t *event);
 
   static void _handle_edit(lv_event_t *event) {

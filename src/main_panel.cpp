@@ -143,6 +143,26 @@ void MainPanel::remove_tab_change_cb(lv_event_cb_t cb, void *user_data) {
   lv_obj_remove_event_cb_with_user_data(tabview, cb, user_data);
 }
 
+void MainPanel::update_chart_range() {
+  const bool adaptive =
+      Config::get_instance()->get<bool>("/ui/adaptive_graph", false);
+
+  if (!adaptive || temp_chart == nullptr) {
+    return;
+  }
+
+  int max_temp = 0;
+  for (const auto &el : sensors) {
+    if (el.second->has_series()) {
+      max_temp = std::max(max_temp, el.second->get_series_max());
+    }
+  }
+
+  // Scala minima 0-100, poi incrementi di 25 gradi con margine superiore.
+  const int chart_max = std::max(100, ((max_temp / 25) + 1) * 25);
+  lv_chart_set_range(temp_chart, LV_CHART_AXIS_PRIMARY_Y, 0, chart_max);
+}
+
 void MainPanel::init(json &j) {
   std::lock_guard<std::mutex> lock(lv_lock);
   extruder_panel.init_active_tool(j);
@@ -160,6 +180,8 @@ void MainPanel::init(json &j) {
       el.second->update_value(value);
     }
   }
+  update_chart_range();
+
   auto fans = State::get_instance()->get_display_fans();
   print_status_panel.init(fans);
   if (mmu_panel != NULL) mmu_panel->init_state();
@@ -181,10 +203,28 @@ void MainPanel::consume(json &j) {
       el.second->update_value(value);
     }
   }
-
   json &pstat_state = j["/params/0/print_stats/state"_json_pointer];
   if (!pstat_state.is_null()) {
-    if (klipper_ready && pstat_state.template get<std::string>() != "printing") {
+    const bool printing =
+        pstat_state.template get<std::string>() == "printing";
+
+    if (print_state_initialized && printing && !was_printing) {
+      for (const auto &el : sensors) {
+        el.second->reset_series_history();
+      }
+
+      const bool adaptive =
+          Config::get_instance()->get<bool>("/ui/adaptive_graph", false);
+
+      if (adaptive) {
+        lv_chart_set_range(temp_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+      }
+    }
+
+    was_printing = printing;
+    print_state_initialized = true;
+
+    if (klipper_ready && !printing) {
       homing_btn.enable();
       extrude_btn.enable();
     } else {
@@ -193,6 +233,7 @@ void MainPanel::consume(json &j) {
     }
   }
 
+  update_chart_range();
   led_btn.set_image(led_panel.get_main_button_image());
 }
 
@@ -408,7 +449,10 @@ void MainPanel::create_main(lv_obj_t * parent) {
   lv_obj_set_style_line_color(temp_chart, col(RAISED), LV_PART_MAIN);
   lv_obj_set_style_line_width(temp_chart, 2, LV_PART_ITEMS);
 
-  lv_chart_set_range(temp_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 300);
+  const bool adaptive_graph =
+      Config::get_instance()->get<bool>("/ui/adaptive_graph", false);
+  lv_chart_set_range(temp_chart, LV_CHART_AXIS_PRIMARY_Y, 0,
+                     adaptive_graph ? 100 : 300);
   // minor_cnt must stay non-zero: lv_chart derives its tick count as
   // (major_cnt - 1) * minor_cnt and draws nothing at all when that is 0
   lv_chart_set_axis_tick(temp_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 0, 5, 1, true, tick_gutter);
@@ -429,7 +473,13 @@ void MainPanel::create_sensors(json &temp_sensors) {
   const int compact_amount = reclaimed_tab_bar_w();
   // Preserve the original balanced chart layout for a short list. Once it
   // grows, fixed-height rows and vertical scrolling keep every tool visible.
-  const bool many_sensors = temp_sensors.size() > 4;
+  size_t visible_sensors = 0;
+  for (const auto &sensor : temp_sensors.items()) {
+    if (sensor.value().value("show_in_list", true)) {
+      ++visible_sensors;
+    }
+  }
+  const bool many_sensors = visible_sensors > 4;
   if (many_sensors) {
     lv_obj_add_flag(temp_cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(temp_cont, LV_DIR_VER);
@@ -438,6 +488,10 @@ void MainPanel::create_sensors(json &temp_sensors) {
     lv_obj_clear_flag(temp_cont, LV_OBJ_FLAG_SCROLLABLE);
   }
   for (auto &sensor : temp_sensors.items()) {
+    if (!sensor.value().value("show_in_list", true)) {
+      continue;
+    }
+
     std::string key = sensor.key();
     bool controllable = sensor.value()["controllable"].template get<bool>();
 
@@ -464,8 +518,11 @@ void MainPanel::create_sensors(json &temp_sensors) {
       sensor_img = Icons::BED;
     }
 
-    lv_chart_series_t *temp_series =
-      lv_chart_add_series(temp_chart, color_code, LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_series_t *temp_series = nullptr;
+    if (sensor.value().value("show_in_graph", true)) {
+      temp_series =
+        lv_chart_add_series(temp_chart, color_code, LV_CHART_AXIS_PRIMARY_Y);
+    }
 
     auto sc = std::make_shared<SensorContainer>(ws, temp_cont, sensor_img,
 			   display_name.c_str(), color_code, controllable, false, numpad, key,

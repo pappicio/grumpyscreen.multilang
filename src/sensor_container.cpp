@@ -3,6 +3,7 @@
 #include "state.h"
 #include "theme.h"
 #include "utils.h"
+#include <algorithm>
 #include <cctype>
 #include <string>
 
@@ -153,6 +154,34 @@ void SensorContainer::update_series(int v) {
       last_updated_ts = std::time(nullptr);
     }
   }
+}
+
+int SensorContainer::get_series_max() const {
+  if (series == nullptr || chart == nullptr) {
+    return 0;
+  }
+
+  lv_coord_t *points = lv_chart_get_y_array(chart, series);
+  if (points == nullptr) {
+    return 0;
+  }
+
+  int max_value = 0;
+  for (int i = 0; i < 5000; ++i) {
+    max_value = std::max(max_value, static_cast<int>(points[i]));
+  }
+
+  return max_value;
+}
+
+void SensorContainer::reset_series_history() {
+  if (series == nullptr || chart == nullptr) {
+    return;
+  }
+
+  lv_chart_set_all_value(chart, series, value);
+  series_seeded = true;
+  last_updated_ts = std::time(nullptr);
 }
 
 void SensorContainer::handle_edit(lv_event_t *e) {
