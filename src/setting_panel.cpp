@@ -14,6 +14,8 @@
 #include <experimental/filesystem>
 #include <vector>
 
+static bool g_restart_required = false;
+
 namespace fs = std::experimental::filesystem;
 namespace sp = subprocess;
 
@@ -69,6 +71,48 @@ static int display_sleep_index(int32_t seconds) {
   return -1;
 }
 
+
+static void ui_bool_setting_changed(lv_event_t *event) {
+    const char *key = static_cast<const char *>(lv_event_get_user_data(event));
+    lv_obj_t *sw = lv_event_get_target(event);
+    Config *conf = Config::get_instance();
+    bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    if (!conf->set_ui_bool(key, enabled)) {
+        bool old_value = conf->get<bool>(std::string("/ui/") + key);
+        if (old_value) lv_obj_add_state(sw, LV_STATE_CHECKED);
+        else lv_obj_clear_state(sw, LV_STATE_CHECKED);
+
+        create_simple_dialog(lv_scr_act(), ::tr("Unable to Save Setting"),
+                             ::tr("The config file could not be updated."), true, true);
+    } else {
+        g_restart_required = true;
+    }
+}
+
+static void add_ui_bool_setting(lv_obj_t *parent, Config *conf,
+                                const char *key, const char *label_text) {
+    lv_obj_t *row = Theme::create_row(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(row, Theme::touch_h(), 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, ::tr(label_text));
+    lv_obj_set_width(label, 0);
+    lv_obj_set_flex_grow(label, 1);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t *sw = lv_switch_create(row);
+    if (conf->get<bool>(std::string("/ui/") + key))
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+
+    lv_obj_add_event_cb(sw, ui_bool_setting_changed,
+                        LV_EVENT_VALUE_CHANGED, const_cast<char *>(key));
+}
+
 static WifiPanelOptions embedded_wifi_options(lv_obj_t *parent) {
   WifiPanelOptions opts;
   opts.parent = parent;
@@ -84,6 +128,59 @@ static int call_command(const std::string &cmd) {
         return -1;
     }
 }
+
+
+static uint16_t g_main_last_tab_index = 0;
+static bool g_main_tab_change_guard = false;
+
+struct RestartPromptContext {
+    SettingPanel *panel;
+    lv_obj_t *tabview;
+    uint16_t target;
+    bool main_tab;
+};
+
+static void restart_prompt_delete_cb(lv_event_t *event) {
+    if (lv_event_get_code(event) != LV_EVENT_DELETE) return;
+    delete static_cast<RestartPromptContext *>(lv_event_get_user_data(event));
+}
+
+static void restart_prompt_result_cb(lv_obj_t *, uint32_t button_idx, void *user_data) {
+    auto *ctx = static_cast<RestartPromptContext *>(user_data);
+    if (!ctx) return;
+
+    if (button_idx == 1) {
+        ctx->panel->resume_tab_change(ctx->tabview, ctx->target, ctx->main_tab);
+    } else if (button_idx == 0) {
+        Config *conf = Config::get_instance();
+        const auto cmd = conf->get<std::string>("/commands/gui_restart_cmd");
+        if (cmd.empty() || call_command(cmd) != 0) {
+            create_simple_dialog(lv_scr_act(), ::tr("Restart GUI Failed"),
+                                 ::tr("Failed to restart GUI!"), true, true);
+        }
+    }
+}
+
+static void show_restart_prompt(SettingPanel *panel, lv_obj_t *tabview,
+                                uint16_t target, bool main_tab) {
+    static const char *buttons[] = {
+        ::tr("Restart GUI"), ::tr("Later"), ""
+    };
+
+    auto *ctx = new RestartPromptContext{panel, tabview, target, main_tab};
+
+    SimpleDialogOptions options{};
+    options.buttons = buttons;
+    options.result_cb = restart_prompt_result_cb;
+    options.user_data = ctx;
+
+    lv_obj_t *dialog = create_configurable_dialog(
+        lv_scr_act(), ::tr("Restart GUI"),
+        ::tr("Some settings require a GUI restart. Restart now?"), options);
+
+    lv_obj_add_event_cb(dialog, restart_prompt_delete_cb, LV_EVENT_DELETE, ctx);
+}
+
 
 static void run_deferred_command_cb(lv_timer_t * t) {
     deferred_cmd_ctx * ctx = (deferred_cmd_ctx *)t->user_data;
@@ -215,7 +312,7 @@ SettingPanel::SettingPanel(KWebSocketClient &c, std::mutex &l, lv_obj_t *parent)
   add_about_line(about_panel, std::string("Commit: ") + version_info.second);
 
   lv_obj_t *settings_panel = lv_obj_create(settings_cont);
-  lv_obj_clear_flag(settings_panel, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(settings_panel, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_style(settings_panel, &Theme::styles().panel, 0);
   lv_obj_set_size(settings_panel, LV_PCT(100), LV_PCT(100));
   lv_obj_set_flex_flow(settings_panel, LV_FLEX_FLOW_COLUMN);
@@ -272,6 +369,13 @@ SettingPanel::SettingPanel(KWebSocketClient &c, std::mutex &l, lv_obj_t *parent)
   }
   lv_obj_add_event_cb(sleep_timeout_selector, &SettingPanel::_setting_changed_cb,
                       LV_EVENT_VALUE_CHANGED, this);
+
+  add_about_line(settings_panel, ::tr("Display options"), true);
+  add_ui_bool_setting(settings_panel, conf, "adaptive_graph", "Adaptive temperature graph");
+  add_ui_bool_setting(settings_panel, conf, "show_automatic_fans", "Show automatic fans");
+  add_ui_bool_setting(settings_panel, conf, "spool_pie", "Spool pie chart");
+  add_ui_bool_setting(settings_panel, conf, "invert_z_icon", "Invert Z icon");
+  add_ui_bool_setting(settings_panel, conf, "show_screws_tilt", "Show screw tilt");
 
   add_about_line(settings_panel, ::tr("Language"), true);
   if (g_lang_codes.empty()) {
@@ -349,9 +453,52 @@ void SettingPanel::set_firmware_restart_available(bool available) {
 }
 
 void SettingPanel::_tabview_event_cb(lv_event_t *event) {
-  if (lv_event_get_code(event) == LV_EVENT_VALUE_CHANGED) {
-    static_cast<SettingPanel *>(lv_event_get_user_data(event))->refresh_active_tab();
+  if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) return;
+  auto *self = static_cast<SettingPanel *>(lv_event_get_user_data(event));
+  if (self->inner_tab_change_guard) return;
+
+  const uint16_t idx = lv_tabview_get_tab_act(self->tabview);
+  const uint16_t settings_idx = lv_obj_get_index(self->settings_tab);
+
+  if (g_restart_required && self->last_inner_tab_index == settings_idx &&
+      idx != settings_idx) {
+    const uint16_t target = idx;
+    self->inner_tab_change_guard = true;
+    lv_tabview_set_act(self->tabview, self->last_inner_tab_index, LV_ANIM_OFF);
+    self->inner_tab_change_guard = false;
+    show_restart_prompt(self, self->tabview, target, false);
+    return;
   }
+
+  self->last_inner_tab_index = idx;
+  self->refresh_active_tab();
+}
+
+bool SettingPanel::handle_main_tab_change(lv_obj_t *tv, uint16_t settings_tab_index) {
+  if (g_main_tab_change_guard) return true;
+  const uint16_t idx = lv_tabview_get_tab_act(tv);
+
+  if (g_restart_required && g_main_last_tab_index == settings_tab_index &&
+      idx != settings_tab_index) {
+    const uint16_t target = idx;
+    g_main_tab_change_guard = true;
+    lv_tabview_set_act(tv, g_main_last_tab_index, LV_ANIM_OFF);
+    g_main_tab_change_guard = false;
+    show_restart_prompt(this, tv, target, true);
+    return true;
+  }
+
+  g_main_last_tab_index = idx;
+  return false;
+}
+
+void SettingPanel::resume_tab_change(lv_obj_t *tv, uint16_t target, bool main_tab) {
+  if (main_tab) {
+    g_main_last_tab_index = target;
+  } else {
+    last_inner_tab_index = target;
+  }
+  lv_tabview_set_act(tv, target, LV_ANIM_OFF);
 }
 
 void SettingPanel::_setting_changed_cb(lv_event_t *event) {
@@ -388,9 +535,7 @@ void SettingPanel::setting_changed(lv_event_t *event) {
     const uint32_t sel = lv_btnmatrix_get_selected_btn(language_selector);
     if (sel < g_lang_codes.size()) {
       saved = conf->set_language(g_lang_codes[sel]);
-      if (saved)
-        create_simple_dialog(lv_scr_act(), ::tr("Language"),
-                             ::tr("Restart GUI to apply the language."), true, false);
+      if (saved) g_restart_required = true;
     }
   }
 

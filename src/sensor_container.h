@@ -31,7 +31,7 @@ class SensorContainer {
   void update_series(int value);
   int get_value() const { return value; }
   bool has_series() const { return series != nullptr; }
-  int get_series_max() const;
+  int get_series_max(uint16_t visible_start, uint16_t visible_count) const;
   void reset_series_history();
   void handle_edit(lv_event_t *event);
 

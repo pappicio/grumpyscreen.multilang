@@ -59,6 +59,24 @@ public:
         return true;
     }
 
+    bool set_ui_string(const std::string& key, const std::string& value) {
+        if (!ConfigOverride(writable_path()).set_ui_string(key, value)) return false;
+        j_["ui"][key] = value;
+        return true;
+    }
+
+    bool set_ui_bool(const std::string& key, bool value) {
+        if (!ConfigOverride(writable_path()).set_ui_bool(key, value)) return false;
+        j_["ui"][key] = value;
+        return true;
+    }
+
+    bool set_ui_int(const std::string& key, int32_t value) {
+        if (!ConfigOverride(writable_path()).set_ui_int(key, value)) return false;
+        j_["ui"][key] = value;
+        return true;
+    }
+
     template <typename T>
     T get(const std::string& json_ptr, T def = T{}) const {
         const auto jp = json::json_pointer(json_ptr);

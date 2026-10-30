@@ -151,14 +151,55 @@ void MainPanel::update_chart_range() {
     return;
   }
 
+  const uint16_t point_count = lv_chart_get_point_count(temp_chart);
+  const int content_width = lv_obj_get_content_width(temp_chart);
+  const int zoom = lv_chart_get_zoom_x(temp_chart);
+  const int scaled_width = (content_width * zoom) >> 8;
+
+  if (point_count < 2 || scaled_width <= 0) {
+    return;
+  }
+
+  const int pad_left =
+      lv_obj_get_style_pad_left(temp_chart, LV_PART_MAIN) +
+      lv_obj_get_style_border_width(temp_chart, LV_PART_MAIN);
+
+  const int scroll_left = lv_obj_get_scroll_left(temp_chart);
+  const int viewport_width = lv_obj_get_width(temp_chart);
+
+  const int first_pixel = std::max(0, scroll_left - pad_left);
+  const int last_pixel =
+      std::max(0, scroll_left + viewport_width - pad_left);
+
+  const long long intervals = point_count - 1;
+
+  int visible_start =
+      static_cast<int>((static_cast<long long>(first_pixel) * intervals) /
+                       scaled_width);
+
+  int visible_end =
+      static_cast<int>((static_cast<long long>(last_pixel) * intervals +
+                        scaled_width - 1) / scaled_width);
+
+  // Include one sample beyond each edge to preserve connecting segments.
+  visible_start = std::max(0, visible_start - 1);
+  visible_end = std::min(static_cast<int>(point_count) - 1,
+                         visible_end + 1);
+
+  const uint16_t visible_count =
+      static_cast<uint16_t>(visible_end - visible_start + 1);
+
   int max_temp = 0;
+
   for (const auto &el : sensors) {
     if (el.second->has_series()) {
-      max_temp = std::max(max_temp, el.second->get_series_max());
+      max_temp = std::max(
+          max_temp,
+          el.second->get_series_max(
+              static_cast<uint16_t>(visible_start), visible_count));
     }
   }
 
-  // Scala minima 0-100, poi incrementi di 25 gradi con margine superiore.
   const int chart_max = std::max(100, ((max_temp / 25) + 1) * 25);
   lv_chart_set_range(temp_chart, LV_CHART_AXIS_PRIMARY_Y, 0, chart_max);
 }
@@ -249,7 +290,10 @@ void MainPanel::_tabview_event_cb(lv_event_t *e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
 
     auto *self = static_cast<MainPanel*>(lv_event_get_user_data(e));
-    lv_obj_t *tv = lv_event_get_target(e);
+    lv_obj_t *tv = self->tabview;
+
+    if (self->setting_panel.handle_main_tab_change(
+            tv, lv_obj_get_index(self->setting_tab))) return;
 
     const uint16_t idx = lv_tabview_get_tab_act(tv);
 

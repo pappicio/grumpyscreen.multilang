@@ -156,8 +156,9 @@ void SensorContainer::update_series(int v) {
   }
 }
 
-int SensorContainer::get_series_max() const {
-  if (series == nullptr || chart == nullptr) {
+int SensorContainer::get_series_max(
+    uint16_t visible_start, uint16_t visible_count) const {
+  if (series == nullptr || chart == nullptr || visible_count == 0) {
     return 0;
   }
 
@@ -166,9 +167,24 @@ int SensorContainer::get_series_max() const {
     return 0;
   }
 
+  const uint16_t point_count = lv_chart_get_point_count(chart);
+  if (point_count == 0) {
+    return 0;
+  }
+
+  const uint16_t series_start = lv_chart_get_x_start_point(chart, series);
+  const uint16_t count =
+      std::min<uint16_t>(visible_count, point_count - visible_start);
+
   int max_value = 0;
-  for (int i = 0; i < 5000; ++i) {
-    max_value = std::max(max_value, static_cast<int>(points[i]));
+
+  for (uint16_t i = 0; i < count; ++i) {
+    const uint16_t index = (series_start + visible_start + i) % point_count;
+    const int value = static_cast<int>(points[index]);
+
+    if (value != LV_CHART_POINT_NONE) {
+      max_value = std::max(max_value, value);
+    }
   }
 
   return max_value;

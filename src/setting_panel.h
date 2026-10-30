@@ -20,6 +20,8 @@ class SettingPanel {
   lv_obj_t *get_container();
   void foreground();
   void select_first_tab();
+  bool handle_main_tab_change(lv_obj_t *tabview, uint16_t settings_tab_index);
+  void resume_tab_change(lv_obj_t *tabview, uint16_t target, bool main_tab);
   // Firmware restart is a Klipper RPC, so it only works while Moonraker is
   // connected to Klipper.
   void set_firmware_restart_available(bool available);
@@ -33,6 +35,8 @@ class SettingPanel {
 
  private:
   static void _tabview_event_cb(lv_event_t *event);
+  uint16_t last_inner_tab_index = 0;
+  bool inner_tab_change_guard = false;
   static void _setting_changed_cb(lv_event_t *event);
   void refresh_active_tab();
   void setting_changed(lv_event_t *event);

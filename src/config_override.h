@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <fstream>
@@ -28,6 +29,44 @@ public:
         for (char c : lang)
             if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') return false;
         return patch_ui_value("language", lang);
+    }
+
+    bool set_ui_string(const std::string& key, const std::string& value) const {
+        static const std::vector<std::string> allowed = {
+            "spool_remaining", "log_level", "chamber_temp_sensor",
+            "extruder_temp_presets", "extruder_temp_default",
+            "extruder_length_presets", "extruder_length_default",
+            "extruder_speed_presets", "extruder_speed_default"
+        };
+        if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) return false;
+        if (key == "spool_remaining" &&
+            value != "percent" && value != "grams" && value != "off") return false;
+        if (key == "log_level" &&
+            value != "trace" && value != "debug" && value != "info") return false;
+        if (value.find_first_of("\r\n") != std::string::npos) return false;
+        return patch_ui_value(key, value);
+    }
+
+    bool set_ui_bool(const std::string& key, bool value) const {
+        static const std::vector<std::string> allowed = {
+            "adaptive_graph", "show_automatic_fans", "spool_pie",
+            "invert_z_icon", "show_screws_tilt"
+        };
+        if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) return false;
+        return patch_ui_value(key, value ? "true" : "false");
+    }
+
+    bool set_ui_int(const std::string& key, int32_t value) const {
+        if (key == "display_rotate") {
+            if (value < 0 || value > 3) return false;
+        } else if (key == "extruder_temp_default" ||
+                   key == "extruder_length_default" ||
+                   key == "extruder_speed_default") {
+            if (value <= 0) return false;
+        } else {
+            return false;
+        }
+        return patch_ui_value(key, std::to_string(value));
     }
 
 private:
